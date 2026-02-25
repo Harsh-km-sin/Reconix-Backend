@@ -1,0 +1,448 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum Role {
+  ADMIN
+  APPROVER
+  OPERATOR
+}
+
+enum AccountType {
+  BANK
+  EXPENSE
+  REVENUE
+  DIRECTCOSTS
+  EQUITY
+  OTHER
+}
+
+enum InvoiceStatus {
+  DRAFT
+  SUBMITTED
+  AUTHORISED
+  PAID
+  VOIDED
+}
+
+enum JobType {
+  INVOICE_REVERSAL
+  OVERPAYMENT_ALLOCATION
+  OVERPAYMENT_CREATION
+}
+
+enum JobStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  PARTIAL
+  FAILED
+}
+
+enum JobItemType {
+  INVOICE
+  OVERPAYMENT
+}
+
+enum JobItemStatus {
+  PENDING
+  PROCESSED
+  SKIPPED
+  FAILED
+}
+
+enum SyncType {
+  CONTACTS
+  INVOICES
+  OVERPAYMENTS
+  FULL
+}
+
+enum SyncLogStatus {
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+enum AuditAction {
+  LOGIN
+  LOGOUT
+  JOB_CREATED
+  JOB_APPROVED
+  JOB_COMPLETED
+  XERO_CONNECTED
+  XERO_DISCONNECTED
+  USER_INVITED
+  ROLE_CHANGED
+  OTHER
+}
+
+// ---------------------------------------------------------------------------
+// Core entities
+// ---------------------------------------------------------------------------
+
+model Company {
+  id                        String   @id @default(cuid())
+  name                      String
+  xeroTenantId              String   @unique @map("xero_tenant_id")
+  xeroShortCode             String?  @map("xero_short_code")
+  baseCurrency              String?  @map("base_currency")
+  defaultBankAccountId      String?  @map("default_bank_account_id")
+  defaultCnNumberFormat     String?  @map("default_cn_number_format")
+  defaultLineAmountType     String?  @map("default_line_amount_type")
+  createdAt                 DateTime @default(now()) @map("created_at")
+  updatedAt                 DateTime? @updatedAt @map("updated_at")
+
+  userCompanyRoles          UserCompanyRole[]
+  xeroConnection           XeroConnection?
+  xeroContacts             XeroContact[]
+  xeroAccounts             XeroAccount[]
+  xeroInvoices              XeroInvoice[]
+  xeroOverpayments          XeroOverpayment[]
+  xeroCreditNotes           XeroCreditNote[]
+  syncLogs                  SyncLog[]
+  jobs                      Job[]
+  jobItems                  JobItem[]
+  batchConfigurations       BatchConfiguration[]
+  auditLogs                 AuditLog[]
+}
+
+model User {
+  id                    String    @id @default(cuid())
+  email                 String    @unique
+  name                  String?
+  phoneNumber           String?   @map("phone_number")
+  timezone              String?
+  dateFormat            String?   @map("date_format") // e.g. "DD/MM/YYYY" or "MM/DD/YYYY"
+  preferences           Json?     // e.g. { "job_complete": true, "job_failed": true, "sync_error": true, "user_invited": true, "weekly_report": false }
+  passwordHash          String?   @map("password_hash") // null until invite accepted (set password)
+  inviteToken           String?   @unique @map("invite_token")
+  inviteTokenExpiresAt  DateTime? @map("invite_token_expires_at")
+  isActive              Boolean   @default(true) @map("is_active")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime? @updatedAt @map("updated_at")
+
+  userCompanyRoles          UserCompanyRole[]
+  grantedUserCompanyRoles   UserCompanyRole[] @relation("GrantedBy")
+  xeroConnectionsConnected  XeroConnection[]  @relation("ConnectedByUser")
+  jobsCreated               Job[]             @relation("CreatedByUser")
+  batchConfigurations       BatchConfiguration[]
+  auditLogs                 AuditLog[]
+}
+
+model UserCompanyRole {
+  id               String   @id @default(cuid())
+  userId           String   @map("user_id")
+  companyId        String   @map("company_id")
+  role             Role
+  grantedByUserId  String?  @map("granted_by_user_id")
+  grantedAt        DateTime? @map("granted_at")
+
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  grantedBy User?   @relation("GrantedBy", fields: [grantedByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([userId, companyId])
+  @@map("user_company_roles")
+}
+
+model XeroConnection {
+  id                 String    @id @default(cuid())
+  companyId          String    @unique @map("company_id")
+  accessToken        String    @map("access_token") // ciphertext at rest
+  refreshToken       String    @map("refresh_token") // ciphertext at rest
+  tokenExpiresAt     DateTime? @map("token_expires_at")
+  scopes             String?
+  connectedByUserId  String    @map("connected_by_user_id")
+  connectedAt        DateTime  @default(now()) @map("connected_at")
+  lastRefreshedAt    DateTime? @map("last_refreshed_at")
+
+  company     Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  connectedBy User    @relation("ConnectedByUser", fields: [connectedByUserId], references: [id], onDelete: Cascade)
+
+  @@map("xero_connections")
+}
+
+// ---------------------------------------------------------------------------
+// Xero mirror tables (cache + raw_xero_json)
+// ---------------------------------------------------------------------------
+
+model XeroContact {
+  id              String   @id @default(cuid())
+  companyId       String   @map("company_id")
+  xeroContactId   String   @map("xero_contact_id")
+  name            String
+  email           String?
+  defaultCurrency String?  @map("default_currency")
+  taxNumber       String?  @map("tax_number")
+  isSupplier      Boolean  @default(false) @map("is_supplier")
+  isCustomer      Boolean  @default(false) @map("is_customer")
+  lastSyncedAt    DateTime? @map("last_synced_at")
+  rawXeroJson     Json?    @map("raw_xero_json")
+
+  company         Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  xeroInvoices    XeroInvoice[]
+  xeroOverpayments XeroOverpayment[]
+  xeroCreditNotes XeroCreditNote[]
+
+  @@unique([companyId, xeroContactId])
+  @@index([companyId, name])
+  @@map("xero_contacts")
+}
+
+model XeroAccount {
+  id             String       @id @default(cuid())
+  companyId      String       @map("company_id")
+  xeroAccountId  String       @map("xero_account_id")
+  code           String
+  name           String
+  type           AccountType
+  currencyCode   String?      @map("currency_code")
+  taxType        String?      @map("tax_type")
+  isActive       Boolean      @default(true) @map("is_active")
+  lastSyncedAt   DateTime?    @map("last_synced_at")
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, xeroAccountId])
+  @@index([companyId])
+  @@map("xero_accounts")
+}
+
+model XeroInvoice {
+  id                String         @id @default(cuid())
+  companyId         String         @map("company_id")
+  xeroInvoiceId     String         @map("xero_invoice_id")
+  xeroContactId     String         @map("xero_contact_id")
+  invoiceNumber     String         @map("invoice_number")
+  invoiceDate       DateTime       @map("invoice_date")
+  dueDate           DateTime?      @map("due_date")
+  status            InvoiceStatus
+  currencyCode      String         @map("currency_code")
+  currencyRate      Decimal?       @map("currency_rate") @db.Decimal(18, 4)
+  subTotal          Decimal        @map("sub_total") @db.Decimal(18, 4)
+  totalTax          Decimal        @map("total_tax") @db.Decimal(18, 4)
+  total             Decimal        @db.Decimal(18, 4)
+  amountDue         Decimal        @map("amount_due") @db.Decimal(18, 4)
+  amountPaid        Decimal?       @map("amount_paid") @db.Decimal(18, 4)
+  lineAmountTypes   String?       @map("line_amount_types")
+  reference         String?
+  hasAttachments    Boolean       @default(false) @map("has_attachments")
+  isReconciled      Boolean       @default(false) @map("is_reconciled")
+  lastSyncedAt      DateTime?     @map("last_synced_at")
+  rawXeroJson       Json?         @map("raw_xero_json")
+
+  company     Company               @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  contact     XeroContact           @relation(fields: [xeroContactId], references: [id], onDelete: Restrict)
+  lineItems   XeroInvoiceLineItem[]
+  jobItems    JobItem[]
+
+  @@unique([companyId, xeroInvoiceId])
+  @@index([companyId, status, invoiceDate])
+  @@map("xero_invoices")
+}
+
+model XeroInvoiceLineItem {
+  id                  String   @id @default(cuid())
+  xeroInvoiceId       String   @map("xero_invoice_id")
+  companyId           String   @map("company_id")
+  lineItemId          String   @map("line_item_id")
+  description         String?
+  quantity            Decimal  @db.Decimal(18, 4)
+  unitAmount          Decimal  @map("unit_amount") @db.Decimal(18, 4)
+  taxAmount           Decimal? @map("tax_amount") @db.Decimal(18, 4)
+  lineAmount          Decimal  @map("line_amount") @db.Decimal(18, 4)
+  accountCode         String?  @map("account_code")
+  taxType             String?  @map("tax_type")
+  trackingCategories  Json?    @map("tracking_categories")
+
+  xeroInvoice XeroInvoice @relation(fields: [xeroInvoiceId], references: [id], onDelete: Cascade)
+
+  @@unique([xeroInvoiceId, lineItemId])
+  @@map("xero_invoice_line_items")
+}
+
+model XeroOverpayment {
+  id                   String   @id @default(cuid())
+  companyId            String   @map("company_id")
+  xeroOverpaymentId    String   @map("xero_overpayment_id")
+  xeroContactId         String   @map("xero_contact_id")
+  overpaymentDate      DateTime @map("overpayment_date")
+  currencyCode         String   @map("currency_code")
+  currencyRate         Decimal? @map("currency_rate") @db.Decimal(18, 4)
+  remainingCredit      Decimal  @map("remaining_credit") @db.Decimal(18, 4)
+  total                Decimal  @db.Decimal(18, 4)
+  status               String?
+  bankAccountXeroId    String?  @map("bank_account_xero_id")
+  lastSyncedAt         DateTime? @map("last_synced_at")
+  rawXeroJson          Json?    @map("raw_xero_json")
+
+  company   Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  contact   XeroContact @relation(fields: [xeroContactId], references: [id], onDelete: Restrict)
+  jobItems  JobItem[]
+
+  @@unique([companyId, xeroOverpaymentId])
+  @@index([companyId, remainingCredit])
+  @@map("xero_overpayments")
+}
+
+model XeroCreditNote {
+  id                 String   @id @default(cuid())
+  companyId          String   @map("company_id")
+  xeroCreditNoteId   String   @map("xero_credit_note_id")
+  xeroContactId      String   @map("xero_contact_id")
+  creditNoteNumber   String   @map("credit_note_number")
+  creditNoteDate     DateTime @map("credit_note_date")
+  status             String?
+  currencyCode       String?  @map("currency_code")
+  remainingCredit    Decimal? @map("remaining_credit") @db.Decimal(18, 4)
+  total              Decimal? @db.Decimal(18, 4)
+  lastSyncedAt       DateTime? @map("last_synced_at")
+  rawXeroJson        Json?    @map("raw_xero_json")
+
+  company Company     @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  contact XeroContact @relation(fields: [xeroContactId], references: [id], onDelete: Restrict)
+
+  @@unique([companyId, xeroCreditNoteId])
+  @@map("xero_credit_notes")
+}
+
+// ---------------------------------------------------------------------------
+// Operational / job tables
+// ---------------------------------------------------------------------------
+
+model SyncLog {
+  id              String        @id @default(cuid())
+  companyId       String        @map("company_id")
+  syncType        SyncType      @map("sync_type")
+  startedAt       DateTime      @default(now()) @map("started_at")
+  completedAt     DateTime?     @map("completed_at")
+  status          SyncLogStatus
+  recordsFetched  Int?         @map("records_fetched")
+  errorMessage    String?       @map("error_message")
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([companyId, syncType, startedAt])
+  @@map("sync_logs")
+}
+
+model Job {
+  id               String    @id @default(cuid())
+  companyId        String    @map("company_id")
+  createdByUserId  String    @map("created_by_user_id")
+  jobType          JobType   @map("job_type")
+  status           JobStatus @default(PENDING)
+  reversalDate     DateTime? @map("reversal_date")
+  totalItems       Int       @map("total_items")
+  processedCount   Int       @default(0) @map("processed_count")
+  skippedCount     Int       @default(0) @map("skipped_count")
+  failedCount      Int       @default(0) @map("failed_count")
+  startedAt        DateTime? @map("started_at")
+  completedAt      DateTime? @map("completed_at")
+  notes            String?
+  createdAt        DateTime  @default(now()) @map("created_at")
+
+  company    Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  createdBy  User      @relation("CreatedByUser", fields: [createdByUserId], references: [id], onDelete: Cascade)
+  jobItems   JobItem[]
+
+  @@index([companyId, status, createdAt])
+  @@map("jobs")
+}
+
+model JobItem {
+  id                          String        @id @default(cuid())
+  jobId                       String        @map("job_id")
+  companyId                   String        @map("company_id")
+  itemType                    JobItemType   @map("item_type")
+  xeroInvoiceId               String?       @map("xero_invoice_id")
+  xeroOverpaymentId           String?       @map("xero_overpayment_id")
+  invoiceNumber               String?       @map("invoice_number")
+  contactName                 String?       @map("contact_name")
+  expectedAmount               Decimal?     @map("expected_amount") @db.Decimal(18, 4)
+  actualAmountDue              Decimal?     @map("actual_amount_due") @db.Decimal(18, 4)
+  amountMismatchAcknowledged   Boolean      @default(false) @map("amount_mismatch_acknowledged")
+  xeroCreditNoteId             String?      @map("xero_credit_note_id")
+  creditNoteNumber             String?      @map("credit_note_number")
+  xeroAllocationId             String?      @map("xero_allocation_id")
+  allocatedAmount              Decimal?     @map("allocated_amount") @db.Decimal(18, 4)
+  status                       JobItemStatus @default(PENDING)
+  skipReason                   String?      @map("skip_reason")
+  failureReason                String?      @map("failure_reason")
+  failureRawError              Json?        @map("failure_raw_error")
+  executedAt                   DateTime?   @map("executed_at")
+  createdAt                    DateTime     @default(now()) @map("created_at")
+
+  job              Job     @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  company          Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  xeroInvoice      XeroInvoice? @relation(fields: [xeroInvoiceId], references: [id], onDelete: SetNull)
+  xeroOverpayment  XeroOverpayment? @relation(fields: [xeroOverpaymentId], references: [id], onDelete: SetNull)
+  retryAttempts    JobItemRetryAttempt[]
+
+  @@index([jobId, status])
+  @@map("job_items")
+}
+
+model JobItemRetryAttempt {
+  id           String    @id @default(cuid())
+  jobItemId    String    @map("job_item_id")
+  attemptNumber Int      @map("attempt_number")
+  status       String?
+  failureReason String?  @map("failure_reason")
+  executedAt   DateTime? @map("executed_at")
+
+  jobItem JobItem @relation(fields: [jobItemId], references: [id], onDelete: Cascade)
+
+  @@index([jobItemId])
+  @@map("job_item_retry_attempts")
+}
+
+// ---------------------------------------------------------------------------
+// Optional / recommended
+// ---------------------------------------------------------------------------
+
+model BatchConfiguration {
+  id               String   @id @default(cuid())
+  companyId        String   @map("company_id")
+  createdByUserId  String   @map("created_by_user_id")
+  name             String
+  jobType          JobType  @map("job_type")
+  configJson       Json     @map("config_json")
+  createdAt        DateTime @default(now()) @map("created_at")
+  lastUsedAt       DateTime? @map("last_used_at")
+
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  createdBy User    @relation(fields: [createdByUserId], references: [id], onDelete: Cascade)
+
+  @@map("batch_configurations")
+}
+
+model AuditLog {
+  id          String     @id @default(cuid())
+  companyId   String?    @map("company_id")
+  userId      String?    @map("user_id")
+  action      AuditAction
+  entityType  String?    @map("entity_type")
+  entityId    String?    @map("entity_id")
+  beforeState Json?      @map("before_state")
+  afterState  Json?      @map("after_state")
+  ipAddress   String?    @map("ip_address")
+  createdAt   DateTime   @default(now()) @map("created_at")
+
+  company Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  user    User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([companyId, createdAt])
+  @@index([userId, createdAt])
+  @@map("audit_logs")
+}
