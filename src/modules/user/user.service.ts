@@ -89,8 +89,8 @@ export const userService = {
     await logAudit({
       action: "USER_INVITED",
       userId: grantedByUserId,
-      entityType: "User",
-      entityId: user.id,
+      resourceType: "User",
+      resourceId: user.id,
       afterState: { email: user.email, assignments: body.assignments },
       ipAddress: ipAddress ?? undefined,
     });

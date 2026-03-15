@@ -363,11 +363,17 @@ export const jobController = {
                 return;
             }
 
-            const { jobId } = req.params;
+             const { jobId } = req.params;
             const job = await prisma.job.findUnique({ where: { id: jobId } });
 
             if (!job || job.companyId !== authedReq.user.companyId) {
                 sendError(res, ErrorCode.NOT_FOUND, "Job not found", HttpStatus.NOT_FOUND);
+                return;
+            }
+
+            // --- Four-Eyes Principle Enforcement ---
+            if (job.createdByUserId === authedReq.user.userId && env.nodeEnv === 'production') {
+                sendError(res, ErrorCode.FORBIDDEN, "Four-Eyes Principle: You cannot approve a job you created", HttpStatus.FORBIDDEN);
                 return;
             }
 

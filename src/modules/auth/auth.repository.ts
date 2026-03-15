@@ -55,7 +55,7 @@ export const authRepository = {
   async findById(id: string) {
     return prisma.user.findFirst({
       where: { id, isActive: true },
-      select: { id: true, email: true, name: true, passwordHash: true },
+      select: { id: true, email: true, name: true, passwordHash: true, mfaEnabled: true, mfaSecret: true },
     });
   },
 
@@ -80,6 +80,20 @@ export const authRepository = {
         grantedByUserId: data.grantedByUserId,
         grantedAt: new Date(),
       },
+    });
+  },
+
+  async updateMFASecret(userId: string, secret: string | null) {
+    return prisma.user.update({
+      where: { id: userId },
+      data: { mfaSecret: secret },
+    });
+  },
+
+  async setMFAEnabled(userId: string, enabled: boolean) {
+    return prisma.user.update({
+      where: { id: userId },
+      data: { mfaEnabled: enabled },
     });
   },
 };

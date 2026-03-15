@@ -12,6 +12,16 @@ export interface SetPasswordBody {
   password: string;
 }
 
+export interface MFAVerifyBody {
+  userId: string;
+  token: string;
+}
+
+export interface MFASetupResponse {
+  secret: string;
+  qrCodeUrl: string;
+}
+
 /** JWT payload; includes role and permissions for access control */
 export interface AuthTokenPayload {
   userId: string;
@@ -23,8 +33,9 @@ export interface AuthTokenPayload {
 
 /** Auth response: permissions are only in the JWT claims, not duplicated in body */
 export interface AuthResponse {
-  token: string;
+  token?: string; // Optional if MFA is required
   user: { id: string; email: string; name: string | null };
+  mfaRequired?: boolean;
   role?: Role;
   companyId?: string;
   /** All companies/roles for this user (for company switcher) */

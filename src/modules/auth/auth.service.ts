@@ -1,18 +1,26 @@
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
+import { generateSecret, verify, generateURI } from "otplib";
+import qrcode from "qrcode";
 import type { Role } from "@prisma/client";
 import { env } from "../../config/index.js";
 import { prisma } from "../../config/index.js";
 import { authRepository } from "./auth.repository.js";
-import type { LoginBody, SetPasswordBody, AuthResponse, AuthTokenPayload } from "./auth.interface.js";
+import type { 
+  LoginBody, 
+  SetPasswordBody, 
+  AuthResponse, 
+  AuthTokenPayload,
+  MFAVerifyBody,
+  MFASetupResponse
+} from "./auth.interface.js";
 import { getPermissionsForRole } from "../../types/permissions.js";
 
 const SALT_ROUNDS = 10;
 
 type RoleWithCompany = { companyId: string; company: { id: string; name: string }; role: Role };
 
-/** Admin sees all companies; others see only their assigned companies. */
 async function getCompaniesForResponse(
   role: Role | undefined,
   assignedRoles: RoleWithCompany[]
@@ -30,8 +38,6 @@ async function getCompaniesForResponse(
     role: r.role,
   }));
 }
-const INVITE_TOKEN_BYTES = 32;
-const INVITE_EXPIRY_DAYS = 7;
 
 function signToken(payload: AuthTokenPayload): string {
   return jwt.sign(payload, env.jwtSecret, {
@@ -41,7 +47,7 @@ function signToken(payload: AuthTokenPayload): string {
 
 export const authService = {
   async login(body: LoginBody): Promise<AuthResponse> {
-    const user = await authRepository.findByEmail(body.email);
+    const user = (await authRepository.findByEmail(body.email)) as any;
     if (!user || !user.isActive) {
       throw new Error("Invalid email or password");
     }
@@ -52,6 +58,15 @@ export const authService = {
     if (!valid) {
       throw new Error("Invalid email or password");
     }
+
+    // Check if MFA is enabled
+    if (user.mfaEnabled) {
+      return {
+        user: { id: user.id, email: user.email, name: user.name ?? user.email.split("@")[0] },
+        mfaRequired: true
+      };
+    }
+
     const firstRole = user.userCompanyRoles?.[0];
     const permissions = getPermissionsForRole(firstRole?.role);
     const payload: AuthTokenPayload = {
@@ -64,6 +79,7 @@ export const authService = {
     const companies = await getCompaniesForResponse(firstRole?.role, user.userCompanyRoles ?? []);
     const token = signToken(payload);
     const displayName = user.name?.trim() || user.email.split("@")[0] || "User";
+    
     return {
       token,
       user: { id: user.id, email: user.email, name: displayName },
@@ -71,6 +87,72 @@ export const authService = {
       companyId: firstRole?.companyId,
       companies,
     };
+  },
+
+  async verifyMFALogin(body: MFAVerifyBody): Promise<AuthResponse> {
+    const user = await authRepository.findById(body.userId);
+    if (!user || !(user as any).mfaEnabled || !(user as any).mfaSecret) {
+        throw new Error("MFA not enabled or user not found");
+    }
+
+    const isValid = verify({ token: body.token, secret: (user as any).mfaSecret });
+    if (!isValid) {
+        throw new Error("Invalid MFA code");
+    }
+
+    // Refresh user with roles
+    const fullUser = await authRepository.findByEmail(user.email);
+    const firstRole = fullUser?.userCompanyRoles?.[0];
+    const permissions = getPermissionsForRole(firstRole?.role);
+    
+    const payload: AuthTokenPayload = {
+      userId: user.id,
+      email: user.email,
+      role: firstRole?.role,
+      companyId: firstRole?.companyId,
+      permissions,
+    };
+    
+    const companies = await getCompaniesForResponse(firstRole?.role, fullUser?.userCompanyRoles ?? []);
+    const token = signToken(payload);
+    const displayName = user.name?.trim() || user.email.split("@")[0] || "User";
+
+    return {
+      token,
+      user: { id: user.id, email: user.email, name: displayName },
+      role: firstRole?.role,
+      companyId: firstRole?.companyId,
+      companies,
+    };
+  },
+
+  async setupMFA(userId: string): Promise<MFASetupResponse> {
+    const user = await authRepository.findById(userId);
+    if (!user) throw new Error("User not found");
+
+    const secret = generateSecret();
+    const otpauth = generateURI({ secret, label: user.email, issuer: "Reconix" });
+    const qrCodeUrl = await qrcode.toDataURL(otpauth);
+    
+    // Store secret temporarily but don't enable yet
+    await authRepository.updateMFASecret(userId, secret);
+
+    return { secret, qrCodeUrl };
+  },
+
+  async verifyAndEnableMFA(userId: string, token: string): Promise<void> {
+    const user = (await authRepository.findById(userId)) as any;
+    if (!user || !user.mfaSecret) throw new Error("MFA setup not initiated");
+
+    const isValid = verify({ token, secret: user.mfaSecret });
+    if (!isValid) throw new Error("Invalid code. Please try again.");
+
+    await authRepository.setMFAEnabled(userId, true);
+  },
+
+  async disableMFA(userId: string): Promise<void> {
+    await authRepository.setMFAEnabled(userId, false);
+    await authRepository.updateMFASecret(userId, null);
   },
 
   async setPassword(body: SetPasswordBody): Promise<AuthResponse> {
@@ -109,9 +191,9 @@ export const authService = {
   },
 
   generateInviteToken(): { token: string; expiresAt: Date } {
-    const token = crypto.randomBytes(INVITE_TOKEN_BYTES).toString("hex");
+    const token = crypto.randomBytes(32).toString("hex");
     const expiresAt = new Date();
-    expiresAt.setDate(expiresAt.getDate() + INVITE_EXPIRY_DAYS);
+    expiresAt.setDate(expiresAt.getDate() + 7);
     return { token, expiresAt };
   },
 
