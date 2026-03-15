@@ -26,6 +26,12 @@ export const env = {
   xeroClientId: required("XERO_CLIENT_ID"),
   xeroClientSecret: required("XERO_CLIENT_SECRET"),
   xeroRedirectUri: required("XERO_REDIRECT_URI"),
+  // SMTP Email
+  smtpHost: optional("SMTP_HOST", ""), // e.g. smtp.sendgrid.net
+  smtpPort: parseInt(optional("SMTP_PORT", "587"), 10),
+  smtpUser: optional("SMTP_USER", ""),
+  smtpPass: optional("SMTP_PASS", ""),
+  emailFrom: optional("EMAIL_FROM", "no-reply@reconix.com"),
   // Security
   tokenEncryptionKey: required("TOKEN_ENCRYPTION_KEY"), // 64 char hex string for AES-256
 } as const;
