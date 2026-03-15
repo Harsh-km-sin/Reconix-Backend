@@ -8,4 +8,4 @@ router.post("/login", authController.login);
 router.post("/set-password", authController.setPassword);
 router.post("/change-password", authMiddleware, authController.changePassword);
 
-export const authRoutes = router;
+export const authRoutes: Router = router;

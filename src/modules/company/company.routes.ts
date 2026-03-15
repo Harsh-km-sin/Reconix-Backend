@@ -9,4 +9,4 @@ router.get("/", requireModule("companies"), companyController.list);
 router.get("/:id", requireModule("companies"), companyController.getOne);
 router.patch("/:id", requireModule("companies", { write: true }), companyController.update);
 
-export const companyRoutes = router;
+export const companyRoutes: Router = router;

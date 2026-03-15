@@ -106,6 +106,7 @@ model Company {
   xeroConnection           XeroConnection?
   xeroContacts             XeroContact[]
   xeroAccounts             XeroAccount[]
+  xeroBankAccounts          XeroBankAccount[]
   xeroInvoices              XeroInvoice[]
   xeroOverpayments          XeroOverpayment[]
   xeroCreditNotes           XeroCreditNote[]
@@ -133,8 +134,9 @@ model User {
 
   userCompanyRoles          UserCompanyRole[]
   grantedUserCompanyRoles   UserCompanyRole[] @relation("GrantedBy")
-  xeroConnectionsConnected  XeroConnection[]  @relation("ConnectedByUser")
+  xeroConnections           XeroConnection[]
   jobsCreated               Job[]             @relation("CreatedByUser")
+  jobsApproved              Job[]             @relation("ApprovedByUser")
   batchConfigurations       BatchConfiguration[]
   auditLogs                 AuditLog[]
 }
@@ -156,19 +158,23 @@ model UserCompanyRole {
 }
 
 model XeroConnection {
-  id                 String    @id @default(cuid())
-  companyId          String    @unique @map("company_id")
-  accessToken        String    @map("access_token") // ciphertext at rest
-  refreshToken       String    @map("refresh_token") // ciphertext at rest
-  tokenExpiresAt     DateTime? @map("token_expires_at")
-  scopes             String?
-  connectedByUserId  String    @map("connected_by_user_id")
-  connectedAt        DateTime  @default(now()) @map("connected_at")
-  lastRefreshedAt    DateTime? @map("last_refreshed_at")
+  id            String   @id @default(cuid())
+  userId        String   @map("user_id")
+  tenantId      String   @unique @map("tenant_id")
+  tenantName    String   @map("tenant_name")
+  tenantType    String   @map("tenant_type") // ORGANISATION | PRACTICE
+  accessToken   String   @map("access_token") // encrypt at rest
+  refreshToken  String   @map("refresh_token") // encrypt at rest
+  expiresAt     DateTime @map("expires_at")
+  scopes        String[]
+  isActive      Boolean  @default(true) @map("is_active")
+  connectedAt   DateTime @default(now()) @map("connected_at")
+  lastSyncedAt  DateTime? @map("last_synced_at")
+  
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company       Company? @relation(fields: [tenantId], references: [xeroTenantId], map: "xero_connection_company_fkey")
 
-  company     Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  connectedBy User    @relation("ConnectedByUser", fields: [connectedByUserId], references: [id], onDelete: Cascade)
-
+  @@index([userId])
   @@map("xero_connections")
 }
 
@@ -216,6 +222,25 @@ model XeroAccount {
   @@unique([companyId, xeroAccountId])
   @@index([companyId])
   @@map("xero_accounts")
+}
+
+model XeroBankAccount {
+  id                  String    @id @default(cuid())
+  companyId           String    @map("company_id")
+  xeroAccountId       String    @map("xero_account_id")   // Xero AccountID
+  code                String?
+  name                String
+  bankAccountNumber   String?   @map("bank_account_number")
+  bankAccountType     String?   @map("bank_account_type")  // BANK, CREDITCARD, PAYPAL, etc.
+  currencyCode        String?   @map("currency_code")      // Key field: per-account currency
+  isActive            Boolean   @default(true) @map("is_active")
+  lastSyncedAt        DateTime? @map("last_synced_at")
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, xeroAccountId])
+  @@index([companyId])
+  @@map("xero_bank_accounts")
 }
 
 model XeroInvoice {
@@ -340,6 +365,7 @@ model Job {
   id               String    @id @default(cuid())
   companyId        String    @map("company_id")
   createdByUserId  String    @map("created_by_user_id")
+  approvedByUserId String?   @map("approved_by_user_id")
   jobType          JobType   @map("job_type")
   status           JobStatus @default(PENDING)
   reversalDate     DateTime? @map("reversal_date")
@@ -349,11 +375,13 @@ model Job {
   failedCount      Int       @default(0) @map("failed_count")
   startedAt        DateTime? @map("started_at")
   completedAt      DateTime? @map("completed_at")
+  approvedAt       DateTime? @map("approved_at")
   notes            String?
   createdAt        DateTime  @default(now()) @map("created_at")
 
   company    Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
   createdBy  User      @relation("CreatedByUser", fields: [createdByUserId], references: [id], onDelete: Cascade)
+  approvedBy User?     @relation("ApprovedByUser", fields: [approvedByUserId], references: [id], onDelete: SetNull)
   jobItems   JobItem[]
 
   @@index([companyId, status, createdAt])

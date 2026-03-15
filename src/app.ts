@@ -1,4 +1,4 @@
-import express from "express";
+import express, { Application } from "express";
 import cors from "cors";
 import swaggerUi from "swagger-ui-express";
 import { routes } from "./routes/index.js";
@@ -6,7 +6,11 @@ import { errorMiddleware } from "./middlewares/error.middleware.js";
 import { openApiSpec } from "./openapi/spec.js";
 import { env } from "./config/index.js";
 
-const app = express();
+// Initialize BullMQ Workers
+import "./jobs/workers/syncWorker.js";
+import "./jobs/workers/jobWorker.js";
+
+const app: Application = express();
 
 app.use(
   cors({

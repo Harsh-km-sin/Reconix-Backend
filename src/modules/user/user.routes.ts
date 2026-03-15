@@ -10,4 +10,4 @@ router.patch("/me", userController.updateMe);
 router.get("/", requireModule("users"), userController.list);
 router.post("/invite", requireModule("users", { write: true }), userController.invite);
 
-export const userRoutes = router;
+export const userRoutes: Router = router;
