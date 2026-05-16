@@ -39,7 +39,11 @@ export const syncWorker = new Worker(
             } else {
                 logger.warn(`Unhandled sync job type: ${type}`);
             }
-        } catch (err) {
+        } catch (err: any) {
+            if (err.name === "XeroTokenExpiredError" || err.response?.status === 400) {
+                logger.error(`Sync failed due to invalid Xero tokens. User must re-authenticate.`, { tenantId });
+                await job.log("Sync failed: Xero connection expired or invalid. Please re-authenticate the company in settings.");
+            }
             logger.error(`Sync job ${job.id} failed`, { err, tenantId, type });
             throw err;
         }
@@ -92,7 +96,6 @@ async function handleFullSync(tenantId: string, companyId: string, job: Job) {
 // ---------------------------------------------------------------------------
 
 async function syncAccounts(xero: any, companyId: string) {
-    logger.info("Syncing accounts...", { companyId });
     const response = await xero.get("/Accounts");
     const accounts = response.data.Accounts;
 
@@ -126,260 +129,333 @@ async function syncAccounts(xero: any, companyId: string) {
             },
         });
     }
+    logger.info(`Synced ${accounts.length} accounts`, { companyId });
 }
 
 async function syncTaxRates(xero: any, tenantId: string) {
-    logger.info("Syncing tax rates...", { tenantId });
+    // Tax rates sync logic here
 }
 
 async function syncContacts(xero: any, companyId: string) {
-    logger.info("Syncing contacts...", { companyId });
-    const response = await xero.get("/Contacts");
-    const contacts = response.data.Contacts;
+    let page = 1;
+    let hasMore = true;
+    let totalContacts = 0;
 
-    for (const contact of contacts) {
-        await prisma.xeroContact.upsert({
-            where: {
-                companyId_xeroContactId: {
+    while (hasMore) {
+        const response = await xero.get(`/Contacts?page=${page}`);
+        const contacts = response.data.Contacts;
+
+        if (!contacts || contacts.length === 0) {
+            hasMore = false;
+            break;
+        }
+
+        for (const contact of contacts) {
+            await prisma.xeroContact.upsert({
+                where: {
+                    companyId_xeroContactId: {
+                        companyId,
+                        xeroContactId: contact.ContactID
+                    }
+                },
+                update: {
+                    name: contact.Name,
+                    email: contact.EmailAddress,
+                    defaultCurrency: contact.DefaultCurrency,
+                    taxNumber: contact.TaxNumber,
+                    isSupplier: contact.IsSupplier,
+                    isCustomer: contact.IsCustomer,
+                    lastSyncedAt: new Date(),
+                    rawXeroJson: contact,
+                },
+                create: {
                     companyId,
-                    xeroContactId: contact.ContactID
-                }
-            },
-            update: {
-                name: contact.Name,
-                email: contact.EmailAddress,
-                defaultCurrency: contact.DefaultCurrency,
-                taxNumber: contact.TaxNumber,
-                isSupplier: contact.IsSupplier,
-                isCustomer: contact.IsCustomer,
-                lastSyncedAt: new Date(),
-                rawXeroJson: contact,
-            },
-            create: {
-                companyId,
-                xeroContactId: contact.ContactID,
-                name: contact.Name,
-                email: contact.EmailAddress,
-                defaultCurrency: contact.DefaultCurrency,
-                taxNumber: contact.TaxNumber,
-                isSupplier: contact.IsSupplier,
-                isCustomer: contact.IsCustomer,
-                lastSyncedAt: new Date(),
-                rawXeroJson: contact,
-            },
-        });
+                    xeroContactId: contact.ContactID,
+                    name: contact.Name,
+                    email: contact.EmailAddress,
+                    defaultCurrency: contact.DefaultCurrency,
+                    taxNumber: contact.TaxNumber,
+                    isSupplier: contact.IsSupplier,
+                    isCustomer: contact.IsCustomer,
+                    lastSyncedAt: new Date(),
+                    rawXeroJson: contact,
+                },
+            });
+            totalContacts++;
+        }
+
+        if (contacts.length < 100) {
+            hasMore = false;
+        } else {
+            page++;
+        }
     }
+    logger.info(`Synced ${totalContacts} contacts`, { companyId });
 }
 
 async function syncInvoices(xero: any, companyId: string) {
-    logger.info("Syncing invoices...", { companyId });
-    const response = await xero.get("/Invoices?Statuses=AUTHORISED,PAID,VOIDED");
-    const invoices = response.data.Invoices;
+    let page = 1;
+    let hasMore = true;
+    let totalInvoices = 0;
 
-    for (const invoice of invoices) {
-        const dbContact = await prisma.xeroContact.findUnique({
-            where: {
-                companyId_xeroContactId: {
-                    companyId,
-                    xeroContactId: invoice.Contact.ContactID
+    while (hasMore) {
+        const response = await xero.get(`/Invoices?Statuses=AUTHORISED,PAID,VOIDED&Where=${encodeURIComponent('Type=="ACCPAY"')}&page=${page}`);
+        const invoices = response.data.Invoices;
+
+        if (!invoices || invoices.length === 0) {
+            hasMore = false;
+            break;
+        }
+
+        for (const invoice of invoices) {
+            const dbContact = await prisma.xeroContact.findUnique({
+                where: {
+                    companyId_xeroContactId: {
+                        companyId,
+                        xeroContactId: invoice.Contact.ContactID
+                    }
                 }
+            });
+
+            if (!dbContact) continue;
+
+            const dbInvoice = await prisma.xeroInvoice.upsert({
+                where: {
+                    companyId_xeroInvoiceId: {
+                        companyId,
+                        xeroInvoiceId: invoice.InvoiceID
+                    }
+                },
+                update: {
+                    xeroContactId: dbContact.id,
+                    type: invoice.Type,
+                    invoiceNumber: invoice.InvoiceNumber || invoice.InvoiceID || "UNKNOWN",
+                    invoiceDate: new Date(invoice.DateString || invoice.Date),
+                    dueDate: invoice.DueDateString ? new Date(invoice.DueDateString) : (invoice.DueDate ? new Date(invoice.DueDate) : null),
+                    status: invoice.Status as any,
+                    currencyCode: invoice.CurrencyCode,
+                    currencyRate: invoice.CurrencyRate,
+                    subTotal: invoice.SubTotal,
+                    totalTax: invoice.TotalTax,
+                    total: invoice.Total,
+                    amountDue: invoice.AmountDue,
+                    amountPaid: invoice.AmountPaid,
+                    lineAmountTypes: invoice.LineAmountTypes,
+                    reference: invoice.Reference,
+                    hasAttachments: invoice.HasAttachments,
+                    isReconciled: invoice.Status === "PAID",
+                    lastSyncedAt: new Date(),
+                    rawXeroJson: invoice,
+                },
+                create: {
+                    companyId,
+                    xeroInvoiceId: invoice.InvoiceID,
+                    xeroContactId: dbContact.id,
+                    type: invoice.Type,
+                    invoiceNumber: invoice.InvoiceNumber || invoice.InvoiceID || "UNKNOWN",
+                    invoiceDate: new Date(invoice.DateString || invoice.Date),
+                    dueDate: invoice.DueDateString ? new Date(invoice.DueDateString) : (invoice.DueDate ? new Date(invoice.DueDate) : null),
+                    status: invoice.Status as any,
+                    currencyCode: invoice.CurrencyCode,
+                    currencyRate: invoice.CurrencyRate,
+                    subTotal: invoice.SubTotal,
+                    totalTax: invoice.TotalTax,
+                    total: invoice.Total,
+                    amountDue: invoice.AmountDue,
+                    amountPaid: invoice.AmountPaid,
+                    lineAmountTypes: invoice.LineAmountTypes,
+                    reference: invoice.Reference,
+                    hasAttachments: invoice.HasAttachments,
+                    isReconciled: invoice.Status === "PAID",
+                    lastSyncedAt: new Date(),
+                    rawXeroJson: invoice,
+                },
+            });
+
+            if (invoice.LineItems && invoice.LineItems.length > 0) {
+                await prisma.xeroInvoiceLineItem.deleteMany({
+                    where: { xeroInvoiceId: dbInvoice.id }
+                });
+
+                await prisma.xeroInvoiceLineItem.createMany({
+                    data: invoice.LineItems.map((li: any) => ({
+                        xeroInvoiceId: dbInvoice.id,
+                        companyId,
+                        lineItemId: li.LineItemID,
+                        description: li.Description,
+                        quantity: li.Quantity || 0,
+                        unitAmount: li.UnitAmount || 0,
+                        taxAmount: li.TaxAmount || 0,
+                        lineAmount: li.LineAmount || 0,
+                        accountCode: li.AccountCode,
+                        taxType: li.TaxType,
+                        trackingCategories: li.Tracking,
+                    })),
+                });
             }
-        });
+            totalInvoices++;
+        }
 
-        if (!dbContact) continue;
-
-        const dbInvoice = await prisma.xeroInvoice.upsert({
-            where: {
-                companyId_xeroInvoiceId: {
-                    companyId,
-                    xeroInvoiceId: invoice.InvoiceID
-                }
-            },
-            update: {
-                xeroContactId: dbContact.id,
-                invoiceNumber: invoice.InvoiceNumber,
-                invoiceDate: new Date(invoice.DateString || invoice.Date),
-                dueDate: invoice.DueDateString ? new Date(invoice.DueDateString) : (invoice.DueDate ? new Date(invoice.DueDate) : null),
-                status: invoice.Status as any,
-                currencyCode: invoice.CurrencyCode,
-                currencyRate: invoice.CurrencyRate,
-                subTotal: invoice.SubTotal,
-                totalTax: invoice.TotalTax,
-                total: invoice.Total,
-                amountDue: invoice.AmountDue,
-                amountPaid: invoice.AmountPaid,
-                lineAmountTypes: invoice.LineAmountTypes,
-                reference: invoice.Reference,
-                hasAttachments: invoice.HasAttachments,
-                isReconciled: invoice.Status === "PAID",
-                lastSyncedAt: new Date(),
-                rawXeroJson: invoice,
-            },
-            create: {
-                companyId,
-                xeroInvoiceId: invoice.InvoiceID,
-                xeroContactId: dbContact.id,
-                invoiceNumber: invoice.InvoiceNumber,
-                invoiceDate: new Date(invoice.DateString || invoice.Date),
-                dueDate: invoice.DueDateString ? new Date(invoice.DueDateString) : (invoice.DueDate ? new Date(invoice.DueDate) : null),
-                status: invoice.Status as any,
-                currencyCode: invoice.CurrencyCode,
-                currencyRate: invoice.CurrencyRate,
-                subTotal: invoice.SubTotal,
-                totalTax: invoice.TotalTax,
-                total: invoice.Total,
-                amountDue: invoice.AmountDue,
-                amountPaid: invoice.AmountPaid,
-                lineAmountTypes: invoice.LineAmountTypes,
-                reference: invoice.Reference,
-                hasAttachments: invoice.HasAttachments,
-                isReconciled: invoice.Status === "PAID",
-                lastSyncedAt: new Date(),
-                rawXeroJson: invoice,
-            },
-        });
-
-        if (invoice.LineItems && invoice.LineItems.length > 0) {
-            await prisma.xeroInvoiceLineItem.deleteMany({
-                where: { xeroInvoiceId: dbInvoice.id }
-            });
-
-            await prisma.xeroInvoiceLineItem.createMany({
-                data: invoice.LineItems.map((li: any) => ({
-                    xeroInvoiceId: dbInvoice.id,
-                    companyId,
-                    lineItemId: li.LineItemID,
-                    description: li.Description,
-                    quantity: li.Quantity || 0,
-                    unitAmount: li.UnitAmount || 0,
-                    taxAmount: li.TaxAmount || 0,
-                    lineAmount: li.LineAmount || 0,
-                    accountCode: li.AccountCode,
-                    taxType: li.TaxType,
-                    trackingCategories: li.Tracking,
-                })),
-            });
+        if (invoices.length < 100) {
+            hasMore = false;
+        } else {
+            page++;
         }
     }
+    logger.info(`Synced ${totalInvoices} invoices`, { companyId });
 }
 
 async function syncCreditNotes(xero: any, companyId: string) {
-    logger.info("Syncing credit notes...", { companyId });
-    const response = await xero.get("/CreditNotes");
-    const creditNotes = response.data.CreditNotes;
+    let page = 1;
+    let hasMore = true;
+    let totalCreditNotes = 0;
 
-    for (const cn of creditNotes) {
-        if (!cn.Contact?.ContactID) continue;
+    while (hasMore) {
+        const response = await xero.get(`/CreditNotes?page=${page}`);
+        const creditNotes = response.data.CreditNotes;
 
-        const dbContact = await prisma.xeroContact.findUnique({
-            where: {
-                companyId_xeroContactId: {
-                    companyId,
-                    xeroContactId: cn.Contact.ContactID
+        if (!creditNotes || creditNotes.length === 0) {
+            hasMore = false;
+            break;
+        }
+
+        for (const cn of creditNotes) {
+            if (!cn.Contact?.ContactID) continue;
+
+            const dbContact = await prisma.xeroContact.findUnique({
+                where: {
+                    companyId_xeroContactId: {
+                        companyId,
+                        xeroContactId: cn.Contact.ContactID
+                    }
                 }
-            }
-        });
+            });
 
-        if (!dbContact) continue;
+            if (!dbContact) continue;
 
-        await prisma.xeroCreditNote.upsert({
-            where: {
-                companyId_xeroCreditNoteId: {
+            await prisma.xeroCreditNote.upsert({
+                where: {
+                    companyId_xeroCreditNoteId: {
+                        companyId,
+                        xeroCreditNoteId: cn.CreditNoteID
+                    }
+                },
+                update: {
+                    xeroContactId: dbContact.id,
+                    creditNoteNumber: cn.CreditNoteNumber || cn.Reference || cn.CreditNoteID,
+                    creditNoteDate: new Date(cn.DateString || cn.Date),
+                    status: cn.Status,
+                    currencyCode: cn.CurrencyCode,
+                    remainingCredit: cn.RemainingCredit,
+                    total: cn.Total,
+                    lastSyncedAt: new Date(),
+                    rawXeroJson: cn,
+                },
+                create: {
                     companyId,
-                    xeroCreditNoteId: cn.CreditNoteID
-                }
-            },
-            update: {
-                xeroContactId: dbContact.id,
-                creditNoteNumber: cn.CreditNoteNumber,
-                creditNoteDate: new Date(cn.DateString || cn.Date),
-                status: cn.Status,
-                currencyCode: cn.CurrencyCode,
-                remainingCredit: cn.RemainingCredit,
-                total: cn.Total,
-                lastSyncedAt: new Date(),
-                rawXeroJson: cn,
-            },
-            create: {
-                companyId,
-                xeroCreditNoteId: cn.CreditNoteID,
-                xeroContactId: dbContact.id,
-                creditNoteNumber: cn.CreditNoteNumber,
-                creditNoteDate: new Date(cn.DateString || cn.Date),
-                status: cn.Status,
-                currencyCode: cn.CurrencyCode,
-                remainingCredit: cn.RemainingCredit,
-                total: cn.Total,
-                lastSyncedAt: new Date(),
-                rawXeroJson: cn,
-            },
-        });
+                    xeroCreditNoteId: cn.CreditNoteID,
+                    xeroContactId: dbContact.id,
+                    creditNoteNumber: cn.CreditNoteNumber || cn.Reference || cn.CreditNoteID,
+                    creditNoteDate: new Date(cn.DateString || cn.Date),
+                    status: cn.Status,
+                    currencyCode: cn.CurrencyCode,
+                    remainingCredit: cn.RemainingCredit,
+                    total: cn.Total,
+                    lastSyncedAt: new Date(),
+                    rawXeroJson: cn,
+                },
+            });
+            totalCreditNotes++;
+        }
+
+        if (creditNotes.length < 100) {
+            hasMore = false;
+        } else {
+            page++;
+        }
     }
+    logger.info(`Synced ${totalCreditNotes} credit notes`, { companyId });
 }
 
 async function syncOverpayments(xero: any, companyId: string) {
-    logger.info("Syncing overpayments...", { companyId });
-    const response = await xero.get("/Overpayments");
-    const overpayments = response.data.Overpayments;
+    let page = 1;
+    let hasMore = true;
+    let totalOverpayments = 0;
 
-    for (const op of overpayments) {
-        if (!op.Contact?.ContactID) continue;
+    while (hasMore) {
+        const response = await xero.get(`/Overpayments?page=${page}`);
+        const overpayments = response.data.Overpayments;
 
-        const dbContact = await prisma.xeroContact.findUnique({
-            where: {
-                companyId_xeroContactId: {
-                    companyId,
-                    xeroContactId: op.Contact.ContactID
+        if (!overpayments || overpayments.length === 0) {
+            hasMore = false;
+            break;
+        }
+
+        for (const op of overpayments) {
+            if (!op.Contact?.ContactID) continue;
+
+            const dbContact = await prisma.xeroContact.findUnique({
+                where: {
+                    companyId_xeroContactId: {
+                        companyId,
+                        xeroContactId: op.Contact.ContactID
+                    }
                 }
-            }
-        });
+            });
 
-        if (!dbContact) continue;
+            if (!dbContact) continue;
 
-        // Note: For Overpayments, bankAccount might be missing or at op.Payments[0].BankAccount.AccountID
-        const bankAccountId = op.Payments && op.Payments.length > 0
-            ? op.Payments[0].BankAccount?.AccountID
-            : null;
+            const bankAccountId = op.Payments && op.Payments.length > 0
+                ? op.Payments[0].BankAccount?.AccountID
+                : null;
 
-        await prisma.xeroOverpayment.upsert({
-            where: {
-                companyId_xeroOverpaymentId: {
+            await prisma.xeroOverpayment.upsert({
+                where: {
+                    companyId_xeroOverpaymentId: {
+                        companyId,
+                        xeroOverpaymentId: op.OverpaymentID
+                    }
+                },
+                update: {
+                    xeroContactId: dbContact.id,
+                    overpaymentDate: new Date(op.DateString || op.Date),
+                    currencyCode: op.CurrencyCode,
+                    currencyRate: op.CurrencyRate,
+                    remainingCredit: op.RemainingCredit,
+                    total: op.Total,
+                    status: op.Status,
+                    bankAccountXeroId: bankAccountId,
+                    lastSyncedAt: new Date(),
+                    rawXeroJson: op,
+                },
+                create: {
                     companyId,
-                    xeroOverpaymentId: op.OverpaymentID
-                }
-            },
-            update: {
-                xeroContactId: dbContact.id,
-                overpaymentDate: new Date(op.DateString || op.Date),
-                currencyCode: op.CurrencyCode,
-                currencyRate: op.CurrencyRate,
-                remainingCredit: op.RemainingCredit,
-                total: op.Total,
-                status: op.Status,
-                bankAccountXeroId: bankAccountId,
-                lastSyncedAt: new Date(),
-                rawXeroJson: op,
-            },
-            create: {
-                companyId,
-                xeroOverpaymentId: op.OverpaymentID,
-                xeroContactId: dbContact.id,
-                overpaymentDate: new Date(op.DateString || op.Date),
-                currencyCode: op.CurrencyCode,
-                currencyRate: op.CurrencyRate,
-                remainingCredit: op.RemainingCredit,
-                total: op.Total,
-                status: op.Status,
-                bankAccountXeroId: bankAccountId,
-                lastSyncedAt: new Date(),
-                rawXeroJson: op,
-            },
-        });
+                    xeroOverpaymentId: op.OverpaymentID,
+                    xeroContactId: dbContact.id,
+                    overpaymentDate: new Date(op.DateString || op.Date),
+                    currencyCode: op.CurrencyCode,
+                    currencyRate: op.CurrencyRate,
+                    remainingCredit: op.RemainingCredit,
+                    total: op.Total,
+                    status: op.Status,
+                    bankAccountXeroId: bankAccountId,
+                    lastSyncedAt: new Date(),
+                    rawXeroJson: op,
+                },
+            });
+            totalOverpayments++;
+        }
+
+        if (overpayments.length < 100) {
+            hasMore = false;
+        } else {
+            page++;
+        }
     }
+    logger.info(`Synced ${totalOverpayments} overpayments`, { companyId });
 }
 
 async function syncBankAccounts(xero: any, companyId: string) {
-    logger.info("Syncing bank accounts...", { companyId });
     const response = await xero.get("/Accounts?where=Type==\"BANK\"");
     const accounts = response.data.Accounts;
 
@@ -413,6 +489,7 @@ async function syncBankAccounts(xero: any, companyId: string) {
             },
         });
     }
+    logger.info(`Synced ${accounts.length} bank accounts`, { companyId });
 }
 
 function mapAccountType(xeroType: string): any {

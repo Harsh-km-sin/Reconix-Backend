@@ -55,6 +55,15 @@ export const jobWorker = new Worker(
                 data: { status: "RUNNING", startedAt: new Date() },
             });
 
+            await prisma.auditLog.create({
+                data: {
+                    action: "JOB_EXECUTION_STARTED",
+                    companyId,
+                    resourceType: "Job",
+                    resourceId: jobId,
+                }
+            });
+
             let processed = 0, failed = 0, skipped = 0;
             const total = fullJob.jobItems.length;
 
@@ -67,7 +76,7 @@ export const jobWorker = new Worker(
                 
                 if (idCheck.alreadyProcessed) {
                     if (idCheck.status === "COMPLETED") {
-                        processed++;
+                        skipped++;
                         logger.info(`Item ${item.id} already processed successfully. Skipping.`);
                         continue;
                     }
@@ -90,6 +99,16 @@ export const jobWorker = new Worker(
                     failed++;
                     await markIdempotencyFailed(idKey, itemErr.response?.data || { message: itemErr.message });
                     logger.error(`JobItem ${item.id} failed`, { error: itemErr.message });
+
+                    await prisma.auditLog.create({
+                        data: {
+                            action: "JOB_ITEM_FAILED",
+                            companyId,
+                            resourceType: "JobItem",
+                            resourceId: item.id,
+                            afterState: { error: itemErr.message, details: itemErr.response?.data }
+                        }
+                    });
                 }
 
                 // Update Progress
@@ -106,13 +125,31 @@ export const jobWorker = new Worker(
                 data: { status: finalStatus, completedAt: new Date() },
             });
 
+            await prisma.auditLog.create({
+                data: {
+                    action: `JOB_EXECUTION_${finalStatus}`,
+                    companyId,
+                    resourceType: "Job",
+                    resourceId: jobId,
+                }
+            });
+
             logger.info(`Job finished [${jobId}]: ${finalStatus} [P:${processed}, F:${failed}]`);
 
-        } catch (err) {
+        } catch (err: any) {
             logger.error(`Job worker execution failed for Job ${jobId}`, { err });
             await prisma.job.update({
                 where: { id: jobId },
                 data: { status: "FAILED", completedAt: new Date() },
+            });
+            await prisma.auditLog.create({
+                data: {
+                    action: "JOB_EXECUTION_FAILED",
+                    companyId,
+                    resourceType: "Job",
+                    resourceId: jobId,
+                    afterState: { error: err.message },
+                }
             });
             throw err;
         }

@@ -63,7 +63,7 @@ export const contactController = {
                 page: pageNum,
                 limit: limitNum,
                 totalPages: Math.ceil(total / limitNum),
-                data: contacts
+                items: contacts
             });
         } catch (err) {
             logger.error("Failed to fetch contacts", { err });

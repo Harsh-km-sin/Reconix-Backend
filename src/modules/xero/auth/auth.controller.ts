@@ -1,12 +1,13 @@
 import { Request, Response } from "express";
 import { v4 as uuidv4 } from "uuid";
 import axios from "axios";
-import { env, logger, prisma } from "../../../config/index.js";
+import { env, logger, prisma, redis } from "../../../config/index.js";
 import { cryptoUtils } from "../../../utils/crypto.js";
 import { syncQueue } from "../../../jobs/queues.js";
 import { SyncJobType } from "../../../jobs/workers/syncWorker.js";
 import { sendSuccess, sendError, ErrorCode, HttpStatus } from "../../../types/api.types.js";
 import { AuthUser } from "../../../types/express.js";
+import { auditService } from "../../audit/audit.service.js";
 
 interface AuthenticatedRequest extends Request {
     user: AuthUser;
@@ -51,7 +52,15 @@ export const authController = {
 
             const authUrl = `https://login.xero.com/identity/connect/authorize?${params.toString()}`;
 
-            sendSuccess(res, { authUrl, verifier, state });
+            // Store verifier and userId in Redis (expires in 10 mins)
+            await redis.set(
+                `xero:state:${state}`,
+                JSON.stringify({ verifier, userId: authedReq.user.userId }),
+                "EX",
+                600
+            );
+
+            sendSuccess(res, { authUrl, state });
         } catch (err) {
             logger.error("Xero connect failed", { err });
             sendError(res, ErrorCode.INTERNAL_ERROR, "Failed to initialize Xero connection");
@@ -61,18 +70,27 @@ export const authController = {
     /**
      * GET /api/v1/xero/callback
      * Exchange code for tokens and upsert connection.
+     * NOTE: This is a public route (no JWT). User is identified via Redis state key.
      */
     async callback(req: Request, res: Response): Promise<void> {
-        const authedReq = req as AuthenticatedRequest;
         try {
-            const { code, state, verifier } = req.query;
+            const { code, state } = req.query;
 
-            if (!code || !state || !verifier) {
-                sendError(res, ErrorCode.VALIDATION_ERROR, "Missing code, state, or verifier", HttpStatus.BAD_REQUEST);
+            if (!code || !state) {
+                sendError(res, ErrorCode.VALIDATION_ERROR, "Missing code or state", HttpStatus.BAD_REQUEST);
                 return;
             }
 
-            // 1. Exchange code for tokens
+            // 1. Retrieve verifier + userId from Redis
+            const storedDataStr = await redis.get(`xero:state:${state as string}`);
+            if (!storedDataStr) {
+                sendError(res, ErrorCode.VALIDATION_ERROR, "Invalid or expired state", HttpStatus.BAD_REQUEST);
+                return;
+            }
+            const { verifier, userId } = JSON.parse(storedDataStr);
+            await redis.del(`xero:state:${state as string}`);
+
+            // 2. Exchange code for tokens
             const clientAuth = Buffer.from(`${env.xeroClientId}:${env.xeroClientSecret}`).toString("base64");
             const tokenResponse = await axios.post(
                 "https://identity.xero.com/connect/token",
@@ -94,7 +112,7 @@ export const authController = {
             const expiresAt = new Date(Date.now() + expires_in * 1000);
             const scopes = scopesString ? scopesString.split(" ") : [];
 
-            // 2. Fetch approved tenants
+            // 3. Fetch approved tenants
             const connectionsResponse = await axios.get("https://api.xero.com/connections", {
                 headers: {
                     Authorization: `Bearer ${access_token}`,
@@ -109,18 +127,13 @@ export const authController = {
                 return;
             }
 
-            if (!authedReq.user) {
-                sendError(res, ErrorCode.UNAUTHORIZED, "Unauthorized");
-                return;
-            }
-
             const encryptedAccessToken = cryptoUtils.encrypt(access_token, env.tokenEncryptionKey);
             const encryptedRefreshToken = cryptoUtils.encrypt(refresh_token, env.tokenEncryptionKey);
 
             // Process each tenant (usually just one, but Xero allows multiple)
             for (const tenant of tenants) {
-                // 3. Ensure Company record exists
-                await prisma.company.upsert({
+                // 4. Ensure Company record exists
+                const dbCompany = await prisma.company.upsert({
                     where: { xeroTenantId: tenant.tenantId },
                     update: { name: tenant.tenantName },
                     create: {
@@ -129,11 +142,27 @@ export const authController = {
                     },
                 });
 
-                // 4. Upsert XeroConnection
+                // Grant admin role to the user for this new company
+                await prisma.userCompanyRole.upsert({
+                    where: {
+                        userId_companyId: {
+                            userId,
+                            companyId: dbCompany.id,
+                        },
+                    },
+                    update: {},
+                    create: {
+                        userId,
+                        companyId: dbCompany.id,
+                        role: "ADMIN",
+                    },
+                });
+
+                // 5. Upsert XeroConnection
                 await prisma.xeroConnection.upsert({
                     where: { tenantId: tenant.tenantId },
                     update: {
-                        userId: authedReq.user.userId,
+                        userId: userId,
                         tenantName: tenant.tenantName,
                         tenantType: tenant.tenantType || "ORGANISATION",
                         accessToken: encryptedAccessToken,
@@ -143,7 +172,7 @@ export const authController = {
                         isActive: true,
                     },
                     create: {
-                        userId: authedReq.user.userId,
+                        userId: userId,
                         tenantId: tenant.tenantId,
                         tenantName: tenant.tenantName,
                         tenantType: tenant.tenantType || "ORGANISATION",
@@ -154,10 +183,19 @@ export const authController = {
                     },
                 });
 
-                // 5. Trigger Initial Sync
+                // 6. Trigger Initial Sync
                 await syncQueue.add(`sync-full-${tenant.tenantId}`, {
                     type: SyncJobType.FULL_SYNC,
                     tenantId: tenant.tenantId,
+                });
+
+                await auditService.record({
+                    companyId: tenant.tenantId, // Using tenantId as companyId prefix for mapping or find existing
+                    userId: userId,
+                    action: "XERO_CONNECTED",
+                    resourceType: "XeroConnection",
+                    resourceId: tenant.tenantId,
+                    afterState: { tenantName: tenant.tenantName, tenantType: tenant.tenantType },
                 });
             }
 
@@ -192,10 +230,36 @@ export const authController = {
                     connectedAt: true,
                     lastSyncedAt: true,
                     isActive: true,
+                    company: {
+                        select: {
+                            id: true,
+                            _count: {
+                                select: {
+                                    xeroInvoices: true,
+                                    xeroContacts: true,
+                                    xeroOverpayments: true,
+                                },
+                            },
+                        },
+                    },
                 },
             });
 
-            sendSuccess(res, connections);
+            // Map to include counts at the top level for cleaner frontend consumption
+            const mappedConnections = connections.map(c => ({
+                companyId: c.company?.id,
+                tenantId: c.tenantId,
+                tenantName: c.tenantName,
+                tenantType: c.tenantType,
+                connectedAt: c.connectedAt,
+                lastSyncedAt: c.lastSyncedAt,
+                isActive: c.isActive,
+                invoiceCount: c.company?._count.xeroInvoices || 0,
+                contactCount: c.company?._count.xeroContacts || 0,
+                overpaymentCount: c.company?._count.xeroOverpayments || 0,
+            }));
+
+            sendSuccess(res, mappedConnections);
         } catch (err) {
             logger.error("Failed to fetch Xero connections", { err });
             sendError(res, ErrorCode.INTERNAL_ERROR, "Failed to fetch connections");
@@ -233,6 +297,18 @@ export const authController = {
             }
 
             await prisma.xeroConnection.delete({ where: { tenantId } });
+
+            await auditService.record({
+                companyId: connection.tenantId,
+                userId: authedReq.user.userId,
+                action: "XERO_DISCONNECTED",
+                resourceType: "XeroConnection",
+                resourceId: tenantId,
+                beforeState: { tenantName: connection.tenantName },
+                ipAddress: req.ip,
+                userAgent: req.headers["user-agent"],
+            });
+
             sendSuccess(res, { message: "Disconnected successfully" });
         } catch (err) {
             logger.error("Failed to disconnect Xero organization", { err });

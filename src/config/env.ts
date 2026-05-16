@@ -1,7 +1,7 @@
 import "dotenv/config";
 
 function required(key: string): string {
-  const value = process.env[key];
+  const value = process.env[key]?.trim();
   if (value === undefined || value === "") {
     throw new Error(`Missing required env: ${key}`);
   }
@@ -9,7 +9,7 @@ function required(key: string): string {
 }
 
 function optional(key: string, defaultValue: string): string {
-  return process.env[key] ?? defaultValue;
+  return process.env[key]?.trim() ?? defaultValue;
 }
 
 export const env = {

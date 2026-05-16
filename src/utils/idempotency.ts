@@ -24,8 +24,13 @@ export const checkIdempotency = async (key: string) => {
 };
 
 export const markIdempotencyCompleted = async (key: string, responseSnapshot?: any) => {
-  await prisma.idempotencyLog.create({
-    data: {
+  await prisma.idempotencyLog.upsert({
+    where: { key },
+    update: {
+      status: "COMPLETED",
+      responseSnapshot: responseSnapshot ?? null,
+    },
+    create: {
       key,
       status: "COMPLETED",
       responseSnapshot: responseSnapshot ?? null,
@@ -34,8 +39,13 @@ export const markIdempotencyCompleted = async (key: string, responseSnapshot?: a
 };
 
 export const markIdempotencyFailed = async (key: string, errorSnapshot?: any) => {
-  await prisma.idempotencyLog.create({
-    data: {
+  await prisma.idempotencyLog.upsert({
+    where: { key },
+    update: {
+      status: "FAILED",
+      responseSnapshot: errorSnapshot ?? null,
+    },
+    create: {
       key,
       status: "FAILED",
       responseSnapshot: errorSnapshot ?? null,

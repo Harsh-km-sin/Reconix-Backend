@@ -42,7 +42,8 @@ export const syncController = {
             const { jobId } = req.params;
             const job = await syncQueue.getJob(jobId);
             if (!job) {
-                sendError(res, ErrorCode.NOT_FOUND, "Job not found", HttpStatus.NOT_FOUND);
+                // Job no longer exists in queue — it has completed/been cleaned up
+                sendSuccess(res, { id: jobId, progress: 100, status: "completed" });
                 return;
             }
 

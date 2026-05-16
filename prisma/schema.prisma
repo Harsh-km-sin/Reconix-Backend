@@ -241,6 +241,7 @@ model XeroInvoice {
   companyId       String        @map("company_id")
   xeroInvoiceId   String        @map("xero_invoice_id")
   xeroContactId   String        @map("xero_contact_id")
+  type            String?
   invoiceNumber   String        @map("invoice_number")
   invoiceDate     DateTime      @map("invoice_date")
   dueDate         DateTime?     @map("due_date")
@@ -411,6 +412,7 @@ model JobItem {
   xeroRequestPayload         Json?         @map("xero_request_payload")
   xeroResponsePayload        Json?         @map("xero_response_payload")
   idempotencyKey             String?       @unique @map("idempotency_key")
+  reversalConfig             Json?         @map("reversal_config")
   executedAt                 DateTime?     @map("executed_at")
   createdAt                  DateTime      @default(now()) @map("created_at")
 

@@ -1,8 +1,10 @@
 import { Request, Response } from "express";
 import { env, logger, prisma } from "../../config/index.js";
+import { Prisma } from "@prisma/client";
 import { jobQueue } from "../../jobs/queues.js";
 import { sendSuccess, sendError, ErrorCode, HttpStatus } from "../../types/api.types.js";
 import { AuthUser } from "../../types/express.js";
+import { auditService } from "../audit/audit.service.js";
 import type { CreateJobBody, AddItemsBody, AutomationJobPayload } from "./job.interface.js";
 
 interface AuthenticatedRequest extends Request {
@@ -39,6 +41,17 @@ export const jobController = {
                     notes: notes ?? null,
                     totalItems: 0,
                 },
+            });
+
+            await auditService.record({
+                companyId: authedReq.user.companyId,
+                userId: authedReq.user.userId,
+                action: "JOB_CREATED",
+                resourceType: "Job",
+                resourceId: job.id,
+                afterState: job,
+                ipAddress: req.ip,
+                userAgent: req.headers["user-agent"],
             });
 
             sendSuccess(res, job, HttpStatus.CREATED);
@@ -101,7 +114,7 @@ export const jobController = {
                 }),
             ]);
 
-            sendSuccess(res, { total, page: pageNum, limit: limitNum, data: jobs });
+            sendSuccess(res, { total, page: pageNum, limit: limitNum, items: jobs });
         } catch (err) {
             logger.error("Failed to list jobs", { err });
             sendError(res, ErrorCode.INTERNAL_ERROR, "Failed to list jobs");
@@ -158,7 +171,18 @@ export const jobController = {
                 return;
             }
 
-            sendSuccess(res, job);
+            const auditLogs = await prisma.auditLog.findMany({
+                where: {
+                    OR: [
+                        { resourceType: "Job", resourceId: jobId },
+                        { resourceType: "JobItem", resourceId: { in: job.jobItems.map(i => i.id) } }
+                    ]
+                },
+                orderBy: { createdAt: "desc" },
+                include: { user: { select: { name: true } } }
+            });
+
+            sendSuccess(res, { ...job, auditLogs });
         } catch (err) {
             logger.error("Failed to get job", { err });
             sendError(res, ErrorCode.INTERNAL_ERROR, "Failed to get job");
@@ -190,12 +214,24 @@ export const jobController = {
                 return;
             }
 
-            if (job.status !== "PENDING") {
-                sendError(res, ErrorCode.VALIDATION_ERROR, "Only PENDING jobs can be deleted", HttpStatus.BAD_REQUEST);
+            if (job.status !== "PENDING" && job.status !== "FAILED") {
+                sendError(res, ErrorCode.VALIDATION_ERROR, "Only PENDING or FAILED jobs can be deleted", HttpStatus.BAD_REQUEST);
                 return;
             }
 
             await prisma.job.delete({ where: { id: jobId } });
+
+            await auditService.record({
+                companyId: authedReq.user.companyId,
+                userId: authedReq.user.userId,
+                action: "JOB_DELETED",
+                resourceType: "Job",
+                resourceId: jobId,
+                beforeState: job,
+                ipAddress: req.ip,
+                userAgent: req.headers["user-agent"],
+            });
+
             sendSuccess(res, { message: "Job deleted" });
         } catch (err) {
             logger.error("Failed to delete job", { err });
@@ -247,6 +283,7 @@ export const jobController = {
                         contactName: item.contactName ?? null,
                         expectedAmount: item.expectedAmount ?? null,
                         actualAmountDue: item.actualAmountDue ?? null,
+                        reversalConfig: item.reversalConfig ? (item.reversalConfig as any) : undefined,
                     })),
                 }),
                 prisma.job.update({
@@ -254,6 +291,17 @@ export const jobController = {
                     data: { totalItems: { increment: items.length } },
                 }),
             ]);
+
+            await auditService.record({
+                companyId: authedReq.user.companyId,
+                userId: authedReq.user.userId,
+                action: "JOB_ITEMS_ADDED",
+                resourceType: "Job",
+                resourceId: jobId,
+                afterState: { count: items.length, items: items.slice(0, 5) }, // Log first 5 for brevity
+                ipAddress: req.ip,
+                userAgent: req.headers["user-agent"],
+            });
 
             sendSuccess(res, { added: items.length }, HttpStatus.CREATED);
         } catch (err) {
@@ -363,7 +411,7 @@ export const jobController = {
                 return;
             }
 
-             const { jobId } = req.params;
+            const { jobId } = req.params;
             const job = await prisma.job.findUnique({ where: { id: jobId } });
 
             if (!job || job.companyId !== authedReq.user.companyId) {
@@ -408,6 +456,17 @@ export const jobController = {
                 },
             });
 
+            await auditService.record({
+                companyId: authedReq.user.companyId,
+                userId: authedReq.user.userId,
+                action: "JOB_APPROVED",
+                resourceType: "Job",
+                resourceId: jobId,
+                beforeState: job,
+                ipAddress: req.ip,
+                userAgent: req.headers["user-agent"],
+            });
+
             const payload: AutomationJobPayload = {
                 jobId,
                 companyId: authedReq.user.companyId,
@@ -421,6 +480,127 @@ export const jobController = {
         } catch (err) {
             logger.error("Failed to approve job", { err });
             sendError(res, ErrorCode.INTERNAL_ERROR, "Failed to approve job");
+        }
+    },
+
+    /**
+     * POST /api/v1/jobs/:jobId/retry
+     * Retries failed items in a job.
+     */
+    async retryJob(req: Request, res: Response): Promise<void> {
+        const authedReq = req as AuthenticatedRequest;
+        try {
+            const { jobId } = req.params;
+            const job = await prisma.job.findUnique({
+                where: { id: jobId },
+                include: { jobItems: true }
+            });
+
+            if (!job || job.companyId !== authedReq.user.companyId) {
+                sendError(res, ErrorCode.NOT_FOUND, "Job not found", HttpStatus.NOT_FOUND);
+                return;
+            }
+
+            // Only retry FAILED or PARTIAL jobs
+            if (!["FAILED", "PARTIAL", "COMPLETED"].includes(job.status)) {
+                sendError(res, ErrorCode.VALIDATION_ERROR, `Cannot retry job in ${job.status} status`, HttpStatus.BAD_REQUEST);
+                return;
+            }
+
+            // Reset failed items
+            // Reset items that are either FAILED or PENDING (if a previous run was interrupted)
+            await prisma.jobItem.updateMany({
+                where: {
+                    jobId,
+                    status: { in: ["FAILED", "PENDING"] }
+                },
+                data: { status: "PENDING", failureReason: null, failureRawError: Prisma.DbNull }
+            });
+
+            // Reset job stats
+            await prisma.job.update({
+                where: { id: jobId },
+                data: {
+                    status: "RUNNING",
+                    failedCount: 0,
+                    completedAt: null,
+                    startedAt: new Date()
+                }
+            });
+
+            const connection = await prisma.xeroConnection.findFirst({
+                where: { userId: authedReq.user.userId, isActive: true },
+            });
+
+            if (!connection) {
+                sendError(res, ErrorCode.VALIDATION_ERROR, "No active Xero connection found", HttpStatus.BAD_REQUEST);
+                return;
+            }
+
+            const payload: AutomationJobPayload = {
+                jobId,
+                companyId: authedReq.user.companyId,
+                tenantId: connection.tenantId,
+            };
+
+            // Use a unique ID for BullMQ so it doesn't ignore the retry if the original failed job is still in the queue
+            const bullMqJobId = `retry-${jobId}-${Date.now()}`;
+            await jobQueue.add(`retry-${jobId}`, payload, { jobId: bullMqJobId });
+
+            logger.info(`Job ${jobId} retried by ${authedReq.user.userId}`);
+            sendSuccess(res, { message: "Job retry started", jobId });
+        } catch (err) {
+            logger.error("Failed to retry job", { err });
+            sendError(res, ErrorCode.INTERNAL_ERROR, "Failed to retry job");
+        }
+    },
+
+    /**
+     * POST /api/v1/jobs/:jobId/cancel
+     * Force-fails a stuck job.
+     */
+    async cancelJob(req: Request, res: Response): Promise<void> {
+        const authedReq = req as AuthenticatedRequest;
+        try {
+            const { jobId } = req.params;
+            const job = await prisma.job.findUnique({
+                where: { id: jobId }
+            });
+
+            if (!job || job.companyId !== authedReq.user.companyId) {
+                sendError(res, ErrorCode.NOT_FOUND, "Job not found", HttpStatus.NOT_FOUND);
+                return;
+            }
+
+            if (job.status !== "RUNNING" && job.status !== "PENDING") {
+                sendError(res, ErrorCode.VALIDATION_ERROR, "Only running or pending jobs can be cancelled", HttpStatus.BAD_REQUEST);
+                return;
+            }
+
+            // Mark job as failed
+            await prisma.job.update({
+                where: { id: jobId },
+                data: {
+                    status: "FAILED",
+                    completedAt: new Date(),
+                    notes: (job.notes ?? "") + " [Manually cancelled/cleared]"
+                }
+            });
+
+            // Also mark any pending items as failed so it's consistent
+            await prisma.jobItem.updateMany({
+                where: { jobId, status: "PENDING" },
+                data: {
+                    status: "FAILED",
+                    failureReason: "Job manually cancelled while item was in queue/processing"
+                }
+            });
+
+            logger.info(`Job ${jobId} manually cancelled by ${authedReq.user.userId}`);
+            sendSuccess(res, { message: "Job cancelled and cleared" });
+        } catch (err) {
+            logger.error("Failed to cancel job", { err });
+            sendError(res, ErrorCode.INTERNAL_ERROR, "Failed to cancel job");
         }
     },
 };

@@ -59,6 +59,18 @@ export const authRepository = {
     });
   },
 
+  async findByIdWithRoles(id: string) {
+    return prisma.user.findFirst({
+      where: { id, isActive: true },
+      include: {
+        userCompanyRoles: {
+          include: { company: true },
+          orderBy: { grantedAt: "desc" },
+        },
+      },
+    });
+  },
+
   async updatePassword(userId: string, passwordHash: string) {
     return prisma.user.update({
       where: { id: userId },
@@ -94,6 +106,13 @@ export const authRepository = {
     return prisma.user.update({
       where: { id: userId },
       data: { mfaEnabled: enabled },
+    });
+  },
+
+  async updatePreferences(userId: string, preferences: any) {
+    return prisma.user.update({
+      where: { id: userId },
+      data: { preferences },
     });
   },
 };

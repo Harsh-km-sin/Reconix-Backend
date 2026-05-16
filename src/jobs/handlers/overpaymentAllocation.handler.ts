@@ -12,10 +12,10 @@ export const handleOverpaymentAllocationItem = async (
 
   try {
     const idempKey = generateIdempotencyKey(job.id, item.id, "ALLOCATE");
-    const { alreadyProcessed } = await checkIdempotency(idempKey);
+    const idCheck = await checkIdempotency(idempKey);
 
-    if (alreadyProcessed) {
-      logger.info(`Item ${item.id} already processed. Skipping.`);
+    if (idCheck.alreadyProcessed && idCheck.status === "COMPLETED") {
+      logger.info(`Item ${item.id} already processed successfully. Skipping.`);
       return;
     }
 
@@ -52,15 +52,18 @@ export const handleOverpaymentAllocationItem = async (
       },
     });
 
-    // Audit Log
-    await auditService.record({
-      companyId: job.companyId,
-      action: "XERO_OVERPAYMENT_ALLOCATED",
-      resourceType: "JobItem",
-      resourceId: item.id,
-      afterState: alloc,
-      xeroResponse: allocResponse.data,
+    // Sync local records immediately
+    await prisma.xeroInvoice.update({
+      where: { id: item.xeroInvoice.id },
+      data: { amountDue: Math.max(0, Number(item.xeroInvoice.amountDue) - amountToAllocate) }
     });
+
+    await prisma.xeroOverpayment.update({
+      where: { id: item.xeroOverpayment.id },
+      data: { remainingCredit: Math.max(0, Number(item.xeroOverpayment.remainingCredit) - amountToAllocate) }
+    });
+
+    // Audit Log (Success logs removed for cleanliness)
 
   } catch (error: any) {
     const errorMessage = error.response?.data?.Elements?.[0]?.ValidationErrors?.[0]?.Message

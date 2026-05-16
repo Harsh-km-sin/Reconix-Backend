@@ -18,7 +18,7 @@ export const parseFlexibleDate = (val: any): Date | null => {
   if (!isNaN(d.getTime())) return d;
 
   // Try common string formats: DD/MM/YYYY, DD-MM-YYYY, YYYY-MM-DD
-  const parts = s.split(/[\/\-.]/);
+  const parts = s.split(/[/\-.]/);
   if (parts.length === 3) {
     const p0 = parseInt(parts[0]);
     const p1 = parseInt(parts[1]);

@@ -50,25 +50,58 @@ export const validationService = {
         const xero = await getXeroClient(tenantId);
         const reports: ValidationReport[] = [];
         
-        // 1. Check Cache First
+        // 1. Cache Disabled for accuracy during development/testing
+        // We want the pre-flight check to be 100% live
+        /*
         const cacheKey = `validation:${tenantId}:${Buffer.from(JSON.stringify(items)).toString('base64').substring(0, 32)}`;
         const cached = await redis.get(cacheKey);
         if (cached) {
             logger.info("Returning cached validation reports");
             return JSON.parse(cached);
         }
+        */
 
         // 2. Batch Fetching Logic
         // We separate items by type and gather IDs/Numbers
         const invoiceItemMap = new Map<string, ValidationItem>();
         const overpaymentItemMap = new Map<string, ValidationItem>();
         
-        items.forEach(item => {
-            if (item.xeroInvoiceId) invoiceItemMap.set(item.xeroInvoiceId, item);
-            else if (item.invoiceNumber) invoiceItemMap.set(item.invoiceNumber, item);
+        // 2a. Internal Duplicate Detection (within this request)
+        const seenInvoices = new Set<string>();
+        const seenOverpayments = new Set<string>();
+        const internalDuplicates = new Set<string>();
 
-            if (item.xeroOverpaymentId) overpaymentItemMap.set(item.xeroOverpaymentId, item);
+        items.forEach(item => {
+            if (item.xeroInvoiceId) {
+                if (seenInvoices.has(item.xeroInvoiceId)) internalDuplicates.add(item.id);
+                seenInvoices.add(item.xeroInvoiceId);
+                invoiceItemMap.set(item.xeroInvoiceId, item);
+            } else if (item.invoiceNumber) {
+                if (seenInvoices.has(item.invoiceNumber)) internalDuplicates.add(item.id);
+                seenInvoices.add(item.invoiceNumber);
+                invoiceItemMap.set(item.invoiceNumber, item);
+            }
+
+            if (item.xeroOverpaymentId) {
+                if (seenOverpayments.has(item.xeroOverpaymentId)) internalDuplicates.add(item.id);
+                seenOverpayments.add(item.xeroOverpaymentId);
+                overpaymentItemMap.set(item.xeroOverpaymentId, item);
+            }
         });
+
+        // 2b. External Duplicate Detection (against existing PENDING/PROCESSING jobs)
+        const pendingJobItems = await prisma.jobItem.findMany({
+            where: {
+                job: { status: { in: ['PENDING', 'RUNNING'] } }
+            },
+            select: { xeroInvoiceId: true, xeroOverpaymentId: true, invoiceNumber: true }
+        });
+
+        const externalDuplicateInvoices = new Set(pendingJobItems.map(ji => ji.xeroInvoiceId || ji.invoiceNumber).filter(Boolean));
+        const externalDuplicateOverpayments = new Set(pendingJobItems.map(ji => ji.xeroOverpaymentId).filter(Boolean));
+
+        // UUID regex for detecting Xero GUIDs vs invoice numbers
+        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
         // Fetch Invoices in batches of 100
         const xeroInvoices: any[] = [];
@@ -76,7 +109,11 @@ export const validationService = {
         
         for (let i = 0; i < invoiceIds.length; i += 100) {
             const chunk = invoiceIds.slice(i, i + 100);
-            const whereClause = chunk.map(id => id.startsWith('INV-') ? `InvoiceNumber=="${id}"` : `InvoiceID==Guid("${id}")`).join(" OR ");
+            const whereClause = chunk.map(id =>
+                uuidRegex.test(id)
+                    ? `InvoiceID==Guid("${id}")`
+                    : `InvoiceNumber=="${id}"`
+            ).join(" OR ");
             try {
                 const response = await xero.get(`/Invoices?Where=${encodeURIComponent(whereClause)}`);
                 xeroInvoices.push(...(response.data.Invoices || []));
@@ -103,11 +140,30 @@ export const validationService = {
         for (const item of items) {
             const report: ValidationReport = { id: item.id, status: "VALID", warnings: [], errors: [] };
             
-            // Link back to fetched data
+            // Check for internal duplicates
+            if (internalDuplicates.has(item.id)) {
+                report.status = "INVALID";
+                report.errors.push("Duplicate reference found within this upload");
+            }
+
+            // Check for external duplicates
+            if (
+                (item.xeroInvoiceId && externalDuplicateInvoices.has(item.xeroInvoiceId)) ||
+                (item.invoiceNumber && externalDuplicateInvoices.has(item.invoiceNumber)) ||
+                (item.xeroOverpaymentId && externalDuplicateOverpayments.has(item.xeroOverpaymentId as string))
+            ) {
+                report.status = report.status === "VALID" ? "WARNING" : report.status;
+                report.warnings.push("This item is already part of another pending or processing job");
+            }
+
             const xeroInv = xeroInvoices.find(inv => 
                 inv.InvoiceID === item.xeroInvoiceId || inv.InvoiceNumber === item.invoiceNumber
             );
             const xeroOp = xeroOverpayments.find(op => op.OverpaymentID === item.xeroOverpaymentId);
+
+            if (xeroInv) {
+                logger.debug(`Validation: Invoice ${xeroInv.InvoiceNumber} balance in Xero: ${xeroInv.AmountDue}, expected: ${item.expectedAmount}`);
+            }
 
             try {
                 if (item.itemType === "INVOICE_REVERSAL") {
@@ -127,15 +183,14 @@ export const validationService = {
                             report.errors.push("Invoice has no remaining balance to reverse");
                         }
 
-                        // Fuzzy Contact Check
+                        // Fuzzy Contact Check — always a WARNING, never a hard block.
+                        // The user explicitly selected this bill by ID, so a name mismatch
+                        // is informational only (could be a subsidiary, alias, or sync artifact).
                         if (item.contactName && xeroInv.Contact?.Name) {
                             const similarity = getSimilarity(item.contactName, xeroInv.Contact.Name);
-                            if (similarity < 0.9 && similarity > 0.6) {
-                                report.status = report.status === "VALID" ? "WARNING" : report.status;
-                                report.warnings.push(`Contact name mismatch: "${item.contactName}" vs "${xeroInv.Contact.Name}"`);
-                            } else if (similarity <= 0.6) {
-                                report.status = "INVALID";
-                                report.errors.push(`Significant contact mismatch. Reference for "${xeroInv.Contact.Name}" but file says "${item.contactName}"`);
+                            if (similarity < 0.9) {
+                                if (report.status === "VALID") report.status = "WARNING";
+                                report.warnings.push(`Contact name differs: selected under "${item.contactName}", Xero shows "${xeroInv.Contact.Name}"`);
                             }
                         }
 
@@ -143,7 +198,7 @@ export const validationService = {
                         if (item.expectedAmount !== undefined) {
                             const diff = Math.abs(xeroInv.AmountDue - item.expectedAmount);
                             if (diff > 0.01) {
-                                report.status = report.status === "VALID" ? "WARNING" : report.status;
+                                report.status = report.status === "VALID" || report.status === "WARNING" ? "WARNING" : report.status;
                                 report.warnings.push(`Amount mismatch: Xero shows $${xeroInv.AmountDue} but expected $${item.expectedAmount}`);
                             }
                         }
@@ -173,8 +228,8 @@ export const validationService = {
             reports.push(report);
         }
 
-        // 4. Cache Results
-        await redis.setex(cacheKey, CACHE_TTL, JSON.stringify(reports));
+        // 4. Cache Results (Disabled for live accuracy)
+        // await redis.setex(cacheKey, CACHE_TTL, JSON.stringify(reports));
 
         return reports;
     }

@@ -10,6 +10,29 @@ export interface CreateJobBody {
 }
 
 /**
+ * Configuration for a single line item in a partial reversal.
+ */
+export interface ReversalLineConfig {
+    lineItemId?: string;
+    description?: string;
+    quantity?: number;      // Overriden quantity for partial reversal
+    unitAmount?: number;    // Override unit amount for partial reversal
+}
+
+/**
+ * Reversal configuration attached to a JobItem for INVOICE_REVERSAL jobs.
+ * Controls FX, date, partial line items, and audit memo.
+ */
+export interface ReversalConfig {
+    reversalType: "FULL" | "PARTIAL";
+    creditNoteNumber?: string;   // Manual override; auto-generated if omitted
+    reason?: string;             // Memo for audit: "Vendor dispute", "Duplicate bill", etc.
+    // Exchange rate is always sourced from the original bill (never overridden)
+    partialAmount?: number;      // For partial by total amount: scales all lines proportionally
+    lineConfigs?: ReversalLineConfig[];  // For partial by line item (advanced)
+}
+
+/**
  * A single item to add to a job.
  * For INVOICE_REVERSAL: provide xeroInvoiceId.
  * For OVERPAYMENT_ALLOCATION: provide xeroOverpaymentId.
@@ -22,6 +45,7 @@ export interface JobItemInput {
     contactName?: string;
     expectedAmount?: number;
     actualAmountDue?: number;
+    reversalConfig?: ReversalConfig; // Optional config for partial reversals
 }
 
 /**

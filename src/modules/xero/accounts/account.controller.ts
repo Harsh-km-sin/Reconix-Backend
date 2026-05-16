@@ -62,7 +62,7 @@ export const accountController = {
                 page: pageNum,
                 limit: limitNum,
                 totalPages: Math.ceil(total / limitNum),
-                data: accounts
+                items: accounts
             });
         } catch (err) {
             logger.error("Failed to fetch accounts", { err });

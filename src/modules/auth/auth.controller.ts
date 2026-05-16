@@ -3,6 +3,7 @@ import { authService } from "./auth.service.js";
 import { loginSchema, setPasswordSchema, changePasswordSchema } from "./auth.validation.js";
 import { ZodError } from "zod";
 import { sendSuccess, sendError, ErrorCode, HttpStatus } from "../../types/api.types.js";
+import { auditService } from "../audit/audit.service.js";
 
 function validationError(res: Response, err: ZodError): void {
   const first = err.errors[0];
@@ -15,6 +16,17 @@ export const authController = {
     try {
       const body = loginSchema.parse(req.body);
       const result = await authService.login(body);
+      
+      if (!result.mfaRequired && result.user) {
+        await auditService.record({
+          companyId: result.companyId || "SYSTEM",
+          userId: result.user.id,
+          action: "USER_LOGIN",
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"],
+        });
+      }
+
       sendSuccess(res, result);
     } catch (err) {
       if (err instanceof ZodError) {
@@ -34,6 +46,15 @@ export const authController = {
     try {
       const body = setPasswordSchema.parse(req.body);
       const result = await authService.setPassword(body);
+
+      await auditService.record({
+        companyId: result.companyId || "SYSTEM",
+        userId: result.user.id,
+        action: "PASSWORD_SET",
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"],
+      });
+
       sendSuccess(res, result);
     } catch (err) {
       if (err instanceof ZodError) {
@@ -57,6 +78,15 @@ export const authController = {
       }
       const body = changePasswordSchema.parse(req.body);
       await authService.changePassword(req.user.userId, body.currentPassword, body.newPassword);
+
+      await auditService.record({
+        companyId: req.user.companyId || "SYSTEM",
+        userId: req.user.userId,
+        action: "PASSWORD_CHANGED",
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"],
+      });
+
       sendSuccess(res, { ok: true });
     } catch (err) {
       if (err instanceof ZodError) {
@@ -97,6 +127,15 @@ export const authController = {
         return;
       }
       await authService.verifyAndEnableMFA(req.user.userId, token);
+
+      await auditService.record({
+        companyId: req.user.companyId || "SYSTEM",
+        userId: req.user.userId,
+        action: "MFA_ENABLED",
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"],
+      });
+
       sendSuccess(res, { ok: true });
     } catch (err) {
       const message = err instanceof Error ? err.message : "MFA verification failed";
@@ -112,6 +151,15 @@ export const authController = {
         return;
       }
       const result = await authService.verifyMFALogin({ userId, token });
+
+      await auditService.record({
+        companyId: result.companyId || "SYSTEM",
+        userId: userId,
+        action: "USER_LOGIN_MFA",
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"],
+      });
+
       sendSuccess(res, result);
     } catch (err) {
       const message = err instanceof Error ? err.message : "MFA verification failed";
@@ -126,9 +174,37 @@ export const authController = {
         return;
       }
       await authService.disableMFA(req.user.userId);
+
+      await auditService.record({
+        companyId: req.user.companyId || "SYSTEM",
+        userId: req.user.userId,
+        action: "MFA_DISABLED",
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"],
+      });
+
       sendSuccess(res, { ok: true });
     } catch (err) {
       sendError(res, ErrorCode.INTERNAL_ERROR, "Disable MFA failed");
+    }
+  },
+
+  async switchCompany(req: Request, res: Response): Promise<void> {
+    try {
+      if (!req.user) {
+        sendError(res, ErrorCode.UNAUTHORIZED, "Authentication required", HttpStatus.UNAUTHORIZED);
+        return;
+      }
+      const { companyId } = req.body;
+      if (!companyId || typeof companyId !== "string") {
+        sendError(res, ErrorCode.VALIDATION_ERROR, "companyId is required", HttpStatus.BAD_REQUEST);
+        return;
+      }
+      const result = await authService.switchCompany(req.user.userId, companyId);
+      sendSuccess(res, result);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Switch failed";
+      sendError(res, ErrorCode.UNAUTHORIZED, message, HttpStatus.UNAUTHORIZED);
     }
   },
 };

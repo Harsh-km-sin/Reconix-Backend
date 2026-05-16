@@ -13,5 +13,6 @@ router.post("/mfa/setup", authMiddleware, authController.setupMFA);
 router.post("/mfa/verify", authMiddleware, authController.verifyMFA);
 router.post("/mfa/login-verify", authController.loginVerifyMFA);
 router.post("/mfa/disable", authMiddleware, authController.disableMFA);
+router.post("/switch-company", authMiddleware, authController.switchCompany);
 
 export const authRoutes: Router = router;

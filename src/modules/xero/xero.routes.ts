@@ -56,6 +56,7 @@ router.get("/sync/status/:jobId", authMiddleware, syncController.getSyncStatus);
 
 // --- Data Query APIs (serve from local DB mirror for job builder) ---
 router.get("/invoices", authMiddleware, invoiceController.getInvoices);
+router.get("/invoices/:id", authMiddleware, invoiceController.getInvoiceDetail);
 router.get("/overpayments", authMiddleware, overpaymentController.getOverpayments);
 router.get("/contacts", authMiddleware, contactController.getContacts);
 router.get("/accounts", authMiddleware, accountController.getAccounts);

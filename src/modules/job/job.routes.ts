@@ -20,5 +20,7 @@ router.patch("/:jobId/items/:itemId/acknowledge", jobController.acknowledgeItem)
 
 // --- Job Approval (2.4) — ADMIN or APPROVER role enforced inside controller ---
 router.post("/:jobId/approve", jobController.approveJob);
+router.post("/:jobId/retry", jobController.retryJob);
+router.post("/:jobId/cancel", jobController.cancelJob);
 
 export const jobRoutes: Router = router;

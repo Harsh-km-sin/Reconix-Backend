@@ -45,6 +45,36 @@ function signToken(payload: AuthTokenPayload): string {
   });
 }
 
+function determineInitialCompanyContext(user: any): { role: Role, companyId: string } | null {
+  const prefs = user.preferences as Record<string, any> | null;
+  const lastActiveCompanyId = prefs?.lastActiveCompanyId;
+  const roles = (user.userCompanyRoles || []) as RoleWithCompany[];
+  
+  // Simple check for global admin
+  const isGlobalAdmin = roles.some(r => r.role === "ADMIN");
+  
+  if (lastActiveCompanyId) {
+      const roleEntry = roles.find(r => r.companyId === lastActiveCompanyId);
+      if (isGlobalAdmin || roleEntry) {
+          return {
+              role: roleEntry?.role ?? "ADMIN",
+              companyId: lastActiveCompanyId
+          };
+      }
+  }
+  
+  // Fallback to first available role
+  const firstRole = roles[0];
+  if (firstRole) {
+      return {
+          role: firstRole.role,
+          companyId: firstRole.companyId
+      };
+  }
+  
+  return null;
+}
+
 export const authService = {
   async login(body: LoginBody): Promise<AuthResponse> {
     const user = (await authRepository.findByEmail(body.email)) as any;
@@ -67,24 +97,27 @@ export const authService = {
       };
     }
 
-    const firstRole = user.userCompanyRoles?.[0];
-    const permissions = getPermissionsForRole(firstRole?.role);
+    const context = determineInitialCompanyContext(user);
+    const effectiveRole = context?.role;
+    const effectiveCompanyId = context?.companyId;
+
+    const permissions = getPermissionsForRole(effectiveRole);
     const payload: AuthTokenPayload = {
       userId: user.id,
       email: user.email,
-      role: firstRole?.role,
-      companyId: firstRole?.companyId,
+      role: effectiveRole,
+      companyId: effectiveCompanyId,
       permissions,
     };
-    const companies = await getCompaniesForResponse(firstRole?.role, user.userCompanyRoles ?? []);
+    const companies = await getCompaniesForResponse(effectiveRole, user.userCompanyRoles ?? []);
     const token = signToken(payload);
     const displayName = user.name?.trim() || user.email.split("@")[0] || "User";
     
     return {
       token,
       user: { id: user.id, email: user.email, name: displayName },
-      role: firstRole?.role,
-      companyId: firstRole?.companyId,
+      role: effectiveRole,
+      companyId: effectiveCompanyId,
       companies,
     };
   },
@@ -102,26 +135,29 @@ export const authService = {
 
     // Refresh user with roles
     const fullUser = await authRepository.findByEmail(user.email);
-    const firstRole = fullUser?.userCompanyRoles?.[0];
-    const permissions = getPermissionsForRole(firstRole?.role);
+    const context = determineInitialCompanyContext(fullUser);
+    const effectiveRole = context?.role;
+    const effectiveCompanyId = context?.companyId;
+
+    const permissions = getPermissionsForRole(effectiveRole);
     
     const payload: AuthTokenPayload = {
       userId: user.id,
       email: user.email,
-      role: firstRole?.role,
-      companyId: firstRole?.companyId,
+      role: effectiveRole,
+      companyId: effectiveCompanyId,
       permissions,
     };
     
-    const companies = await getCompaniesForResponse(firstRole?.role, fullUser?.userCompanyRoles ?? []);
+    const companies = await getCompaniesForResponse(effectiveRole, fullUser?.userCompanyRoles ?? []);
     const token = signToken(payload);
     const displayName = user.name?.trim() || user.email.split("@")[0] || "User";
 
     return {
       token,
       user: { id: user.id, email: user.email, name: displayName },
-      role: firstRole?.role,
-      companyId: firstRole?.companyId,
+      role: effectiveRole,
+      companyId: effectiveCompanyId,
       companies,
     };
   },
@@ -169,23 +205,26 @@ export const authService = {
       throw new Error("Invalid or expired invite link");
     }
     const withRoles = await authRepository.findByEmail(updated.email);
-    const firstRole = withRoles?.userCompanyRoles?.[0];
-    const permissions = getPermissionsForRole(firstRole?.role);
+    const context = determineInitialCompanyContext(withRoles);
+    const effectiveRole = context?.role;
+    const effectiveCompanyId = context?.companyId;
+
+    const permissions = getPermissionsForRole(effectiveRole);
     const payload: AuthTokenPayload = {
       userId: updated.id,
       email: updated.email,
-      role: firstRole?.role,
-      companyId: firstRole?.companyId,
+      role: effectiveRole,
+      companyId: effectiveCompanyId,
       permissions,
     };
-    const companies = await getCompaniesForResponse(firstRole?.role, withRoles?.userCompanyRoles ?? []);
+    const companies = await getCompaniesForResponse(effectiveRole, withRoles?.userCompanyRoles ?? []);
     const token = signToken(payload);
     const displayName = updated.name?.trim() || updated.email.split("@")[0] || "User";
     return {
       token,
       user: { id: updated.id, email: updated.email, name: displayName },
-      role: firstRole?.role,
-      companyId: firstRole?.companyId,
+      role: effectiveRole,
+      companyId: effectiveCompanyId,
       companies,
     };
   },
@@ -195,6 +234,49 @@ export const authService = {
     const expiresAt = new Date();
     expiresAt.setDate(expiresAt.getDate() + 7);
     return { token, expiresAt };
+  },
+
+  async switchCompany(userId: string, targetCompanyId: string): Promise<AuthResponse> {
+    const user = await authRepository.findByIdWithRoles(userId);
+    if (!user) throw new Error("User not found");
+
+    const roles = user.userCompanyRoles as RoleWithCompany[];
+    const roleEntry = roles.find((r) => r.companyId === targetCompanyId);
+
+    // Global admin if ANY company role is ADMIN (simple heuristic)
+    const isGlobalAdmin = roles.some((r) => r.role === "ADMIN");
+
+    if (!isGlobalAdmin && !roleEntry) {
+      throw new Error("Access denied to this company");
+    }
+
+    // Confirm company exists
+    const company = await prisma.company.findUnique({ where: { id: targetCompanyId } });
+    if (!company) throw new Error("Company not found");
+
+    // Persist to user preferences
+    const prefs = (user.preferences as Record<string, any>) || {};
+    await authRepository.updatePreferences(userId, { ...prefs, lastActiveCompanyId: targetCompanyId });
+
+    const effectiveRole = roleEntry?.role ?? ("ADMIN" as Role);
+    const permissions = getPermissionsForRole(effectiveRole);
+    const payload: AuthTokenPayload = {
+      userId: user.id,
+      email: user.email,
+      role: effectiveRole,
+      companyId: targetCompanyId,
+      permissions,
+    };
+    const companies = await getCompaniesForResponse(effectiveRole, roles);
+    const token = signToken(payload);
+    const displayName = user.name?.trim() || user.email.split("@")[0] || "User";
+    return {
+      token,
+      user: { id: user.id, email: user.email, name: displayName },
+      role: effectiveRole,
+      companyId: targetCompanyId,
+      companies,
+    };
   },
 
   async changePassword(userId: string, currentPassword: string, newPassword: string): Promise<void> {

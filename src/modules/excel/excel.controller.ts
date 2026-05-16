@@ -4,6 +4,7 @@ import { prisma, logger } from "../../config/index.js";
 import { storage } from "../../lib/storage.js";
 import { sendSuccess, sendError, ErrorCode, HttpStatus } from "../../types/api.types.js";
 import { AuthUser } from "../../types/express.js";
+import { auditService } from "../audit/audit.service.js";
 
 interface AuthenticatedRequest extends Request {
   user: AuthUser;
@@ -35,6 +36,17 @@ export const excelController = {
           status: "UPLOADED",
           sheetsFound: [], // Will be filled on parse
         }
+      });
+
+      await auditService.record({
+        companyId: authedReq.user.companyId!,
+        userId: authedReq.user.userId,
+        action: "EXCEL_UPLOADED",
+        resourceType: "ExcelUpload",
+        resourceId: record.id,
+        afterState: { originalName: record.originalName, sizeBytes: record.sizeBytes },
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"],
       });
 
       sendSuccess(res, record, HttpStatus.CREATED);
@@ -71,6 +83,17 @@ export const excelController = {
         jobType,
         mapping
       });
+      await auditService.record({
+        companyId: authedReq.user.companyId!,
+        userId: authedReq.user.userId,
+        action: "MAPPING_TEMPLATE_SAVED",
+        resourceType: "FieldMappingTemplate",
+        resourceId: result.id,
+        afterState: result,
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"],
+      });
+
       sendSuccess(res, result);
     } catch (err) {
        sendError(res, ErrorCode.INTERNAL_ERROR, "Failed to save mapping template");
