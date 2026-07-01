@@ -1,9 +1,17 @@
 import { prisma, logger } from "../../config/index.js";
 import { getXeroClient } from "../../config/xeroClient.js";
-import { auditService } from "../../modules/audit/audit.service.js";
-import { generateIdempotencyKey, checkIdempotency, markIdempotencyCompleted } from "../../utils/idempotency.js";
+import { withResourceLock } from "../../utils/lock.js";
+import { roundCurrency } from "../../utils/financialMath.js";
 import type { ReversalConfig, ReversalLineConfig } from "../../modules/job/job.interface.js";
 
+/**
+ * Reverse an invoice by creating an ACCPAYCREDIT credit note and allocating it
+ * back to the original invoice.
+ *
+ * Idempotency is owned by the worker (see jobWorker). Here we serialize on the
+ * invoice so a single invoice cannot be reversed by two concurrent jobs, and we
+ * re-read its balance fresh inside the lock before capping the allocation.
+ */
 export const handleInvoiceReversalItem = async (
   job: any,
   item: any,
@@ -13,15 +21,8 @@ export const handleInvoiceReversalItem = async (
   const rawJson: any = item.xeroInvoice.rawXeroJson ?? {};
   const reversalConfig: ReversalConfig | null = item.reversalConfig ?? null;
 
+  await withResourceLock(`invoice:${item.xeroInvoiceId}`, async () => {
   try {
-    const idempKey = generateIdempotencyKey(job.id, item.id, "REVERSE");
-    const idCheck = await checkIdempotency(idempKey);
-
-    if (idCheck.alreadyProcessed && idCheck.status === "COMPLETED") {
-      logger.info(`Item ${item.id} already processed successfully. Skipping.`);
-      return;
-    }
-
     // ─── 1. Determine exchange rate and base totals ────────────────────────
     // ACCOUNTING POLICY: Always use the original bill's CurrencyRate to prevent
     // FX gain/loss discrepancies.
@@ -125,20 +126,25 @@ export const handleInvoiceReversalItem = async (
     logger.info(`Credit Note created: ${xeroCn.CreditNoteID} (${cnNumber}). Total: ${xeroCn.Total}`);
 
     // ─── 7. Allocate to the original Invoice ────────────────────────────────
-    // We allocate the LESSER of the Credit Note Total or the Invoice's remaining balance.
-    // Use Number() to handle potential Decimal objects from Prisma or strings from Xero.
+    // We allocate the LESSER of the Credit Note Total or the Invoice's remaining
+    // balance. The balance is re-read FRESH inside the lock so a concurrent job
+    // that already reduced amountDue is reflected here.
+    const freshInvoice = await prisma.xeroInvoice.findUnique({
+      where: { id: item.xeroInvoice.id },
+      select: { amountDue: true },
+    });
     const cnAvailable = Number(xeroCn.RemainingCredit || xeroCn.Total || 0);
-    const invoiceRemaining = Number(item.xeroInvoice.amountDue || 0);
-    
-    const allocationAmount = Math.min(cnAvailable, invoiceRemaining);
-    
+    const invoiceRemaining = Number(freshInvoice?.amountDue ?? item.xeroInvoice.amountDue ?? 0);
+
+    const allocationAmount = roundCurrency(Math.min(cnAvailable, invoiceRemaining));
+
     if (allocationAmount <= 0) {
        logger.warn(`Allocation amount is 0 (CN: ${cnAvailable}, Inv: ${invoiceRemaining}). Skipping allocation.`);
     } else {
       const allocationPayload = {
         Allocations: [{
           Invoice: { InvoiceID: item.xeroInvoice.xeroInvoiceId },
-          Amount: parseFloat(allocationAmount.toFixed(2)),
+          Amount: allocationAmount,
           Date: reversalDate,
         }],
       };
@@ -147,45 +153,40 @@ export const handleInvoiceReversalItem = async (
         await xero.put(`/CreditNotes/${xeroCn.CreditNoteID}/Allocations`, allocationPayload);
         logger.info(`Allocated ${allocationAmount} from CN ${cnNumber} to Invoice ${item.invoiceNumber}`);
       } catch (allocErr: any) {
-        const allocMsg = allocErr.response?.data?.Elements?.[0]?.ValidationErrors?.[0]?.Message 
-          || allocErr.response?.data?.Message 
+        const allocMsg = allocErr.response?.data?.Elements?.[0]?.ValidationErrors?.[0]?.Message
+          || allocErr.response?.data?.Message
           || allocErr.message;
-        
-        logger.error(`Allocation failed for CN ${cnNumber} to Invoice ${item.invoiceNumber}`, { 
+
+        logger.error(`Allocation failed for CN ${cnNumber} to Invoice ${item.invoiceNumber}`, {
           error: allocMsg,
           invoiceId: item.xeroInvoice.xeroInvoiceId,
-          xeroResponse: allocErr.response?.data 
+          xeroResponse: allocErr.response?.data
         });
         throw new Error(`Credit Note created (${cnNumber}) but allocation failed: ${allocMsg}`);
       }
     }
 
-    // ─── 8. Update the database records ─────────────────────────────────────
-    await prisma.jobItem.update({
-      where: { id: item.id },
-      data: {
-        status: "PROCESSED",
-        xeroCreditNoteId: xeroCn.CreditNoteID,
-        creditNoteNumber: xeroCn.CreditNoteNumber || cnNumber,
-        allocatedAmount: allocationAmount,
-        xeroRequestPayload: cnPayload as any,
-        xeroResponsePayload: cnResponse.data as any,
-        executedAt: new Date(),
-      },
-    });
+    // ─── 8 & 9. Persist the item result and the new invoice balance atomically ─
+    const newAmountDue = roundCurrency(Math.max(0, invoiceRemaining - allocationAmount));
 
-    // ─── 9. Update local Invoice balance
-    const originalAmountDue = Number(item.xeroInvoice.amountDue);
-    const newAmountDue = Math.max(0, originalAmountDue - allocationAmount);
-    
-    await prisma.xeroInvoice.update({
-      where: { id: item.xeroInvoice.id },
-      data: { amountDue: newAmountDue }
-    });
-
-    // ─── 10. Mark Idempotency Success ─────────────────────────────────────────
-    // ONLY do this once everything (CN + Allocation + DB) has succeeded!
-    await markIdempotencyCompleted(idempKey, xeroCn);
+    await prisma.$transaction([
+      prisma.jobItem.update({
+        where: { id: item.id },
+        data: {
+          status: "PROCESSED",
+          xeroCreditNoteId: xeroCn.CreditNoteID,
+          creditNoteNumber: xeroCn.CreditNoteNumber || cnNumber,
+          allocatedAmount: allocationAmount,
+          xeroRequestPayload: cnPayload as any,
+          xeroResponsePayload: cnResponse.data as any,
+          executedAt: new Date(),
+        },
+      }),
+      prisma.xeroInvoice.update({
+        where: { id: item.xeroInvoice.id },
+        data: { amountDue: newAmountDue },
+      }),
+    ]);
 
   } catch (error: any) {
     const errorMessage = error.response?.data?.Elements?.[0]?.ValidationErrors?.[0]?.Message
@@ -203,4 +204,5 @@ export const handleInvoiceReversalItem = async (
 
     throw error;
   }
+  });
 };

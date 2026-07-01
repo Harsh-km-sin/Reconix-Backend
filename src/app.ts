@@ -21,7 +21,8 @@ app.use(
     origin: env.frontendOrigin,
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-Active-Tenant"],
+    // Active company is resolved from the JWT, not a client header.
+    allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
 
@@ -32,6 +33,19 @@ app.use(sanitizeMiddleware);
 app.use(auditLogger);
 
 // Rate Limiting
+// Strict limiter on authentication endpoints — applied in ALL environments to
+// blunt brute-force / credential-stuffing / TOTP-guessing attempts.
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 20, // 20 auth attempts per IP per window
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: "Too many authentication attempts, please try again later.",
+});
+app.use("/api/v1/auth", authLimiter);
+
+// General limiter for the rest of the API (production only, to avoid throttling
+// the polling-heavy dev UI).
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 100, // limit each IP to 100 requests per windowMs

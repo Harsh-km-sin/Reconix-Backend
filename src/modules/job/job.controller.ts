@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import { env, logger, prisma } from "../../config/index.js";
+import { logger, prisma } from "../../config/index.js";
 import { Prisma } from "@prisma/client";
 import { jobQueue } from "../../jobs/queues.js";
 import { sendSuccess, sendError, ErrorCode, HttpStatus } from "../../types/api.types.js";
@@ -9,6 +9,44 @@ import type { CreateJobBody, AddItemsBody, AutomationJobPayload } from "./job.in
 
 interface AuthenticatedRequest extends Request {
     user: AuthUser;
+}
+
+/**
+ * Resolve the active Xero connection for a job's OWN company.
+ *
+ * The tenant is derived from `company.xeroTenantId`, never from an arbitrary
+ * user connection, so a job can only ever be executed against the Xero
+ * organisation it belongs to. On failure it writes an error response and
+ * returns null; callers should `return` immediately when null is received.
+ */
+async function resolveCompanyTenant(
+    companyId: string,
+    res: Response
+): Promise<{ tenantId: string } | null> {
+    const company = await prisma.company.findUnique({
+        where: { id: companyId },
+        select: { xeroTenantId: true },
+    });
+    if (!company) {
+        sendError(res, ErrorCode.NOT_FOUND, "Company not found", HttpStatus.NOT_FOUND);
+        return null;
+    }
+
+    const connection = await prisma.xeroConnection.findUnique({
+        where: { tenantId: company.xeroTenantId },
+        select: { tenantId: true, isActive: true },
+    });
+    if (!connection || !connection.isActive) {
+        sendError(
+            res,
+            ErrorCode.VALIDATION_ERROR,
+            "No active Xero connection found for this company",
+            HttpStatus.BAD_REQUEST
+        );
+        return null;
+    }
+
+    return { tenantId: connection.tenantId };
 }
 
 export const jobController = {
@@ -420,7 +458,8 @@ export const jobController = {
             }
 
             // --- Four-Eyes Principle Enforcement ---
-            if (job.createdByUserId === authedReq.user.userId && env.nodeEnv === 'production') {
+            // Enforced in ALL environments: the creator of a job can never approve it.
+            if (job.createdByUserId === authedReq.user.userId) {
                 sendError(res, ErrorCode.FORBIDDEN, "Four-Eyes Principle: You cannot approve a job you created", HttpStatus.FORBIDDEN);
                 return;
             }
@@ -435,15 +474,11 @@ export const jobController = {
                 return;
             }
 
-            // Fetch the xeroConnection to get tenantId for the Xero API client
-            const connection = await prisma.xeroConnection.findFirst({
-                where: { userId: authedReq.user.userId, isActive: true },
-            });
-
-            if (!connection) {
-                sendError(res, ErrorCode.VALIDATION_ERROR, "No active Xero connection found", HttpStatus.BAD_REQUEST);
-                return;
-            }
+            // Resolve the Xero tenant from the JOB'S OWN COMPANY — never from an
+            // arbitrary user connection. Otherwise a user connected to multiple
+            // tenants could execute a job against the wrong Xero organisation.
+            const connection = await resolveCompanyTenant(job.companyId, res);
+            if (!connection) return; // resolveCompanyTenant already sent the error
 
             // Transition to RUNNING and enqueue
             await prisma.job.update({
@@ -501,8 +536,9 @@ export const jobController = {
                 return;
             }
 
-            // Only retry FAILED or PARTIAL jobs
-            if (!["FAILED", "PARTIAL", "COMPLETED"].includes(job.status)) {
+            // Only retry FAILED or PARTIAL jobs. COMPLETED jobs must never be
+            // re-run — doing so would re-post already-executed Xero operations.
+            if (!["FAILED", "PARTIAL"].includes(job.status)) {
                 sendError(res, ErrorCode.VALIDATION_ERROR, `Cannot retry job in ${job.status} status`, HttpStatus.BAD_REQUEST);
                 return;
             }
@@ -528,18 +564,12 @@ export const jobController = {
                 }
             });
 
-            const connection = await prisma.xeroConnection.findFirst({
-                where: { userId: authedReq.user.userId, isActive: true },
-            });
-
-            if (!connection) {
-                sendError(res, ErrorCode.VALIDATION_ERROR, "No active Xero connection found", HttpStatus.BAD_REQUEST);
-                return;
-            }
+            const connection = await resolveCompanyTenant(job.companyId, res);
+            if (!connection) return; // resolveCompanyTenant already sent the error
 
             const payload: AutomationJobPayload = {
                 jobId,
-                companyId: authedReq.user.companyId,
+                companyId: job.companyId,
                 tenantId: connection.tenantId,
             };
 

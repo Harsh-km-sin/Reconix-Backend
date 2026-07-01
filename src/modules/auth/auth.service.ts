@@ -6,11 +6,12 @@ import qrcode from "qrcode";
 import type { Role } from "@prisma/client";
 import { env } from "../../config/index.js";
 import { prisma } from "../../config/index.js";
+import { cryptoUtils } from "../../utils/crypto.js";
 import { authRepository } from "./auth.repository.js";
-import type { 
-  LoginBody, 
-  SetPasswordBody, 
-  AuthResponse, 
+import type {
+  LoginBody,
+  SetPasswordBody,
+  AuthResponse,
   AuthTokenPayload,
   MFAVerifyBody,
   MFASetupResponse
@@ -19,19 +20,65 @@ import { getPermissionsForRole } from "../../types/permissions.js";
 
 const SALT_ROUNDS = 10;
 
+/** Short-lived token proving a user passed the password step and now owes a TOTP. */
+const MFA_PENDING_PURPOSE = "mfa_pending";
+const MFA_PENDING_TTL = "5m";
+
+interface MfaPendingClaims {
+  userId: string;
+  purpose: typeof MFA_PENDING_PURPOSE;
+}
+
+/** Issue a signed token that authorises ONLY the second-factor (TOTP) step. */
+function signMfaPendingToken(userId: string): string {
+  return jwt.sign({ userId, purpose: MFA_PENDING_PURPOSE }, env.jwtSecret, {
+    expiresIn: MFA_PENDING_TTL,
+  });
+}
+
+/** Verify an MFA pending token and return the userId it was issued for. */
+function verifyMfaPendingToken(token: string): string {
+  let claims: MfaPendingClaims;
+  try {
+    claims = jwt.verify(token, env.jwtSecret) as MfaPendingClaims;
+  } catch {
+    throw new Error("MFA session expired. Please sign in again.");
+  }
+  if (claims.purpose !== MFA_PENDING_PURPOSE || !claims.userId) {
+    throw new Error("Invalid MFA session token");
+  }
+  return claims.userId;
+}
+
+/**
+ * Encrypt a TOTP secret for storage at rest (AES-256-GCM).
+ */
+function encryptSecret(plain: string): string {
+  return cryptoUtils.encrypt(plain, env.tokenEncryptionKey);
+}
+
+/**
+ * Decrypt a stored TOTP secret. Tolerates legacy plaintext secrets (those not
+ * in the `iv:tag:ciphertext` format) so pre-existing rows keep working.
+ */
+function decryptSecret(stored: string): string {
+  const looksEncrypted = stored.split(":").length === 3;
+  if (!looksEncrypted) return stored;
+  return cryptoUtils.decrypt(stored, env.tokenEncryptionKey);
+}
+
 type RoleWithCompany = { companyId: string; company: { id: string; name: string }; role: Role };
 
+/**
+ * The companies a user may act on are ONLY those they have an explicit
+ * UserCompanyRole for. An ADMIN role is scoped to its own company like any
+ * other role — it does not grant access to every tenant in the system.
+ * (A platform-wide super-admin, if ever needed, should be a separate concept.)
+ */
 async function getCompaniesForResponse(
-  role: Role | undefined,
+  _role: Role | undefined,
   assignedRoles: RoleWithCompany[]
 ): Promise<{ companyId: string; companyName: string; role: Role }[]> {
-  if (role === "ADMIN") {
-    const all = await prisma.company.findMany({
-      select: { id: true, name: true },
-      orderBy: { name: "asc" },
-    });
-    return all.map((c) => ({ companyId: c.id, companyName: c.name, role: "ADMIN" as Role }));
-  }
   return assignedRoles.map((r) => ({
     companyId: r.companyId,
     companyName: r.company.name,
@@ -49,20 +96,16 @@ function determineInitialCompanyContext(user: any): { role: Role, companyId: str
   const prefs = user.preferences as Record<string, any> | null;
   const lastActiveCompanyId = prefs?.lastActiveCompanyId;
   const roles = (user.userCompanyRoles || []) as RoleWithCompany[];
-  
-  // Simple check for global admin
-  const isGlobalAdmin = roles.some(r => r.role === "ADMIN");
-  
+
+  // Prefer the user's last active company, but only if they still hold a role
+  // there. Access is always tied to an explicit UserCompanyRole entry.
   if (lastActiveCompanyId) {
       const roleEntry = roles.find(r => r.companyId === lastActiveCompanyId);
-      if (isGlobalAdmin || roleEntry) {
-          return {
-              role: roleEntry?.role ?? "ADMIN",
-              companyId: lastActiveCompanyId
-          };
+      if (roleEntry) {
+          return { role: roleEntry.role, companyId: roleEntry.companyId };
       }
   }
-  
+
   // Fallback to first available role
   const firstRole = roles[0];
   if (firstRole) {
@@ -71,7 +114,7 @@ function determineInitialCompanyContext(user: any): { role: Role, companyId: str
           companyId: firstRole.companyId
       };
   }
-  
+
   return null;
 }
 
@@ -89,11 +132,15 @@ export const authService = {
       throw new Error("Invalid email or password");
     }
 
-    // Check if MFA is enabled
+    // Check if MFA is enabled. The password has now been verified, so we issue a
+    // short-lived pending token that the client must present to complete the
+    // second factor. We do NOT expose a bare userId — otherwise the TOTP step
+    // could be driven without ever proving knowledge of the password.
     if (user.mfaEnabled) {
       return {
         user: { id: user.id, email: user.email, name: user.name ?? user.email.split("@")[0] },
-        mfaRequired: true
+        mfaRequired: true,
+        mfaToken: signMfaPendingToken(user.id),
       };
     }
 
@@ -123,13 +170,19 @@ export const authService = {
   },
 
   async verifyMFALogin(body: MFAVerifyBody): Promise<AuthResponse> {
-    const user = await authRepository.findById(body.userId);
+    // Derive the user from the signed pending token, never from client input.
+    const userId = verifyMfaPendingToken(body.mfaToken);
+
+    const user = await authRepository.findById(userId);
     if (!user || !(user as any).mfaEnabled || !(user as any).mfaSecret) {
         throw new Error("MFA not enabled or user not found");
     }
 
-    const isValid = verify({ token: body.token, secret: (user as any).mfaSecret });
-    if (!isValid) {
+    const { valid } = await verify({
+      token: body.token,
+      secret: decryptSecret((user as any).mfaSecret),
+    });
+    if (!valid) {
         throw new Error("Invalid MFA code");
     }
 
@@ -169,10 +222,11 @@ export const authService = {
     const secret = generateSecret();
     const otpauth = generateURI({ secret, label: user.email, issuer: "Reconix" });
     const qrCodeUrl = await qrcode.toDataURL(otpauth);
-    
-    // Store secret temporarily but don't enable yet
-    await authRepository.updateMFASecret(userId, secret);
 
+    // Store the secret encrypted at rest; not enabled until the user verifies a code.
+    await authRepository.updateMFASecret(userId, encryptSecret(secret));
+
+    // The plaintext secret is returned once, for the user's authenticator app.
     return { secret, qrCodeUrl };
   },
 
@@ -180,8 +234,8 @@ export const authService = {
     const user = (await authRepository.findById(userId)) as any;
     if (!user || !user.mfaSecret) throw new Error("MFA setup not initiated");
 
-    const isValid = verify({ token, secret: user.mfaSecret });
-    if (!isValid) throw new Error("Invalid code. Please try again.");
+    const { valid } = await verify({ token, secret: decryptSecret(user.mfaSecret) });
+    if (!valid) throw new Error("Invalid code. Please try again.");
 
     await authRepository.setMFAEnabled(userId, true);
   },
@@ -243,10 +297,9 @@ export const authService = {
     const roles = user.userCompanyRoles as RoleWithCompany[];
     const roleEntry = roles.find((r) => r.companyId === targetCompanyId);
 
-    // Global admin if ANY company role is ADMIN (simple heuristic)
-    const isGlobalAdmin = roles.some((r) => r.role === "ADMIN");
-
-    if (!isGlobalAdmin && !roleEntry) {
+    // Access requires an explicit role for the target company. ADMIN of one
+    // company does NOT imply access to others.
+    if (!roleEntry) {
       throw new Error("Access denied to this company");
     }
 
@@ -258,7 +311,7 @@ export const authService = {
     const prefs = (user.preferences as Record<string, any>) || {};
     await authRepository.updatePreferences(userId, { ...prefs, lastActiveCompanyId: targetCompanyId });
 
-    const effectiveRole = roleEntry?.role ?? ("ADMIN" as Role);
+    const effectiveRole = roleEntry.role;
     const permissions = getPermissionsForRole(effectiveRole);
     const payload: AuthTokenPayload = {
       userId: user.id,
