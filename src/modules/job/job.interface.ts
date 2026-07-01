@@ -29,6 +29,7 @@ export interface ReversalConfig {
     reason?: string;             // Memo for audit: "Vendor dispute", "Duplicate bill", etc.
     // Exchange rate is always sourced from the original bill (never overridden)
     partialAmount?: number;      // For partial by total amount: scales all lines proportionally
+    amountMode?: "TAX_EXCLUSIVE" | "BILL_TOTAL"; // How partialAmount is interpreted
     lineConfigs?: ReversalLineConfig[];  // For partial by line item (advanced)
 }
 

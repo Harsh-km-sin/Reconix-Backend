@@ -56,7 +56,30 @@ export const handleInvoiceReversalItem = async (
     } else if (isPartial && reversalConfig.partialAmount) {
       // Partial by total amount (provided in base currency)
       // First, convert the target partial amount to the Transaction Currency
-      const targetInTxCurrency = Number(reversalConfig.partialAmount) * originalCurrencyRate;
+      let targetInTxCurrency = Number(reversalConfig.partialAmount) * originalCurrencyRate;
+
+      // ─── BILL_TOTAL mode: back-calculate tax-exclusive amount ───────────
+      // When amountMode is BILL_TOTAL, the user entered the desired Credit Note
+      // *total* (including tax). We need to derive the tax-exclusive line amount
+      // that, after Xero applies taxes, will produce that exact total.
+      if (reversalConfig.amountMode === "BILL_TOTAL") {
+        // Calculate effective tax rate from the original bill
+        const originalSubtotal = allLines.reduce(
+          (sum: number, li: any) => sum + (Number(li.UnitAmount) * Number(li.Quantity)),
+          0
+        );
+        const originalTotalTax = Number(rawJson.TotalTax) || 0;
+        const effectiveTaxRate = originalSubtotal > 0 ? originalTotalTax / originalSubtotal : 0;
+
+        // Back-calculate: taxExclusiveAmount = enteredTotal / (1 + effectiveTaxRate)
+        targetInTxCurrency = targetInTxCurrency / (1 + effectiveTaxRate);
+
+        logger.info(
+          `BILL_TOTAL mode: entered=${reversalConfig.partialAmount}, ` +
+          `effectiveTaxRate=${(effectiveTaxRate * 100).toFixed(4)}%, ` +
+          `taxExclusiveTarget=${targetInTxCurrency.toFixed(4)}`
+        );
+      }
       
       // Calculate current subtotal from raw Xero lines
       const fullSubtotal = allLines.reduce((sum: number, li: any) => sum + (Number(li.UnitAmount) * Number(li.Quantity)), 0);

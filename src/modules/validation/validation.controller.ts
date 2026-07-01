@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import { validationService } from "./validation.service.js";
-import { prisma } from "../../config/index.js";
+import { prisma, logger } from "../../config/index.js";
 import { sendSuccess, sendError, ErrorCode, HttpStatus } from "../../types/api.types.js";
 import { AuthUser } from "../../types/express.js";
 
@@ -37,15 +37,47 @@ export const validationController = {
         return;
       }
 
-      // Get tenant ID from active connection
+      if (!authedReq.user?.companyId) {
+        sendError(res, ErrorCode.UNAUTHORIZED, "No active company selected", HttpStatus.UNAUTHORIZED);
+        return;
+      }
+
+      // Step 1: Resolve the company's Xero tenant ID from the DB (avoids stale JWT data issues)
+      const company = await prisma.company.findUnique({
+        where: { id: authedReq.user.companyId },
+        select: { id: true, xeroTenantId: true, name: true }
+      });
+
+      if (!company) {
+        sendError(res, ErrorCode.NOT_FOUND, "Company not found for the active session", HttpStatus.NOT_FOUND);
+        return;
+      }
+
+      // Step 2: Find the XeroConnection by tenantId directly (most reliable lookup path)
       const connection = await prisma.xeroConnection.findFirst({
-        where: { userId: authedReq.user.userId, isActive: true }
+        where: {
+          tenantId: company.xeroTenantId,
+          isActive: true,
+        }
       });
 
       if (!connection) {
-        sendError(res, ErrorCode.VALIDATION_ERROR, "No active Xero connection", HttpStatus.BAD_REQUEST);
+        sendError(
+          res,
+          ErrorCode.VALIDATION_ERROR,
+          `No active Xero connection found for company "${company.name}". Please reconnect to Xero.`,
+          HttpStatus.BAD_REQUEST
+        );
         return;
       }
+
+      logger.info("Running validation", { 
+        companyId: authedReq.user.companyId, 
+        companyName: company.name,
+        xeroTenantId: company.xeroTenantId,
+        connectionTenantId: connection.tenantId,
+        itemCount: itemsToValidate.length 
+      });
 
       const report = await validationService.validateItems(connection.tenantId, itemsToValidate);
       

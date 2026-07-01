@@ -86,6 +86,7 @@ model Company {
   defaultBankAccountId  String?   @map("default_bank_account_id")
   defaultCnNumberFormat String?   @map("default_cn_number_format")
   defaultLineAmountType String?   @map("default_line_amount_type")
+  partialReversalAmountMode String? @default("TAX_EXCLUSIVE") @map("partial_reversal_amount_mode")
   createdAt             DateTime  @default(now()) @map("created_at")
   updatedAt             DateTime? @updatedAt @map("updated_at")
 

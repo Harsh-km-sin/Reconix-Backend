@@ -114,11 +114,20 @@ export const validationService = {
                     ? `InvoiceID==Guid("${id}")`
                     : `InvoiceNumber=="${id}"`
             ).join(" OR ");
+            logger.info("Xero batch invoice fetch", { tenantId, whereClause, chunkSize: chunk.length });
             try {
                 const response = await xero.get(`/Invoices?Where=${encodeURIComponent(whereClause)}`);
-                xeroInvoices.push(...(response.data.Invoices || []));
-            } catch (err) {
-                logger.error("Xero batch invoice fetch failed", { err });
+                const fetched = response.data.Invoices || [];
+                logger.info("Xero batch invoice fetch result", { tenantId, fetched: fetched.length });
+                xeroInvoices.push(...fetched);
+            } catch (err: any) {
+                logger.error("Xero batch invoice fetch failed", { 
+                    tenantId,
+                    whereClause,
+                    status: err?.response?.status,
+                    data: err?.response?.data,
+                    message: err?.message
+                });
             }
         }
 

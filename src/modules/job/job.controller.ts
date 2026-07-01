@@ -435,13 +435,23 @@ export const jobController = {
                 return;
             }
 
-            // Fetch the xeroConnection to get tenantId for the Xero API client
+            // Resolve the company's xeroTenantId from DB, then find the active XeroConnection by tenantId
+            const jobCompany = await prisma.company.findUnique({
+                where: { id: authedReq.user.companyId },
+                select: { id: true, xeroTenantId: true, name: true }
+            });
+
+            if (!jobCompany) {
+                sendError(res, ErrorCode.NOT_FOUND, "Company not found for the active session", HttpStatus.NOT_FOUND);
+                return;
+            }
+
             const connection = await prisma.xeroConnection.findFirst({
-                where: { userId: authedReq.user.userId, isActive: true },
+                where: { tenantId: jobCompany.xeroTenantId, isActive: true },
             });
 
             if (!connection) {
-                sendError(res, ErrorCode.VALIDATION_ERROR, "No active Xero connection found", HttpStatus.BAD_REQUEST);
+                sendError(res, ErrorCode.VALIDATION_ERROR, `No active Xero connection found for company "${jobCompany.name}". Please reconnect to Xero.`, HttpStatus.BAD_REQUEST);
                 return;
             }
 
@@ -528,12 +538,22 @@ export const jobController = {
                 }
             });
 
+            const retryCompany = await prisma.company.findUnique({
+                where: { id: authedReq.user.companyId },
+                select: { id: true, xeroTenantId: true, name: true }
+            });
+
+            if (!retryCompany) {
+                sendError(res, ErrorCode.NOT_FOUND, "Company not found for the active session", HttpStatus.NOT_FOUND);
+                return;
+            }
+
             const connection = await prisma.xeroConnection.findFirst({
-                where: { userId: authedReq.user.userId, isActive: true },
+                where: { tenantId: retryCompany.xeroTenantId, isActive: true },
             });
 
             if (!connection) {
-                sendError(res, ErrorCode.VALIDATION_ERROR, "No active Xero connection found", HttpStatus.BAD_REQUEST);
+                sendError(res, ErrorCode.VALIDATION_ERROR, `No active Xero connection found for company "${retryCompany.name}". Please reconnect to Xero.`, HttpStatus.BAD_REQUEST);
                 return;
             }
 

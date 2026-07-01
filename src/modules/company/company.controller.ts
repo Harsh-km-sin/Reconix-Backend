@@ -43,6 +43,7 @@ export const companyController = {
       defaultBankAccountId?: string | null;
       defaultCnNumberFormat?: string | null;
       defaultLineAmountType?: string | null;
+      partialReversalAmountMode?: string | null;
     };
     const company = await companyService.update(companyId, body, {
       userId: req.user.userId,

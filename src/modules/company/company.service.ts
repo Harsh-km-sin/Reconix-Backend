@@ -48,6 +48,7 @@ export const companyService = {
         defaultBankAccountId: true,
         defaultCnNumberFormat: true,
         defaultLineAmountType: true,
+        partialReversalAmountMode: true,
       },
     });
   },
@@ -59,6 +60,7 @@ export const companyService = {
       defaultBankAccountId?: string | null;
       defaultCnNumberFormat?: string | null;
       defaultLineAmountType?: string | null;
+      partialReversalAmountMode?: string | null;
     },
     ctx: UserContext
   ) {
@@ -71,6 +73,7 @@ export const companyService = {
         ...(body.defaultBankAccountId !== undefined && { defaultBankAccountId: body.defaultBankAccountId }),
         ...(body.defaultCnNumberFormat !== undefined && { defaultCnNumberFormat: body.defaultCnNumberFormat }),
         ...(body.defaultLineAmountType !== undefined && { defaultLineAmountType: body.defaultLineAmountType }),
+        ...(body.partialReversalAmountMode !== undefined && { partialReversalAmountMode: body.partialReversalAmountMode }),
       },
       select: {
         id: true,
@@ -79,6 +82,7 @@ export const companyService = {
         defaultBankAccountId: true,
         defaultCnNumberFormat: true,
         defaultLineAmountType: true,
+        partialReversalAmountMode: true,
       },
     });
   },
