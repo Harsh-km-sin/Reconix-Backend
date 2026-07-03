@@ -4,6 +4,7 @@ import { Prisma } from "@prisma/client";
 import { jobQueue } from "../../jobs/queues.js";
 import { sendSuccess, sendError, ErrorCode, HttpStatus } from "../../types/api.types.js";
 import { AuthUser } from "../../types/express.js";
+import { CAPABILITIES, hasPermission } from "../../types/permissions.js";
 import { auditService } from "../audit/audit.service.js";
 import type { CreateJobBody, AddItemsBody, AutomationJobPayload } from "./job.interface.js";
 
@@ -458,9 +459,14 @@ export const jobController = {
             }
 
             // --- Four-Eyes Principle Enforcement ---
-            // Enforced in ALL environments: the creator of a job can never approve it.
-            if (job.createdByUserId === authedReq.user.userId) {
-                sendError(res, ErrorCode.FORBIDDEN, "Four-Eyes Principle: You cannot approve a job you created", HttpStatus.FORBIDDEN);
+            // A creator may approve their own job ONLY if their role carries the
+            // self-approve capability (jobs:self-approve). ADMIN has it by default
+            // (full control); APPROVER/OPERATOR do not, so they still require a
+            // separate approver. Toggle per role in ROLE_CAPABILITIES.
+            const isSelfApproval = job.createdByUserId === authedReq.user.userId;
+            const canSelfApprove = hasPermission(authedReq.user.permissions ?? [], CAPABILITIES.SELF_APPROVE_JOBS);
+            if (isSelfApproval && !canSelfApprove) {
+                sendError(res, ErrorCode.FORBIDDEN, "Four-Eyes Principle: you cannot approve a job you created", HttpStatus.FORBIDDEN);
                 return;
             }
 
