@@ -13,7 +13,9 @@ export interface SetPasswordBody {
 }
 
 export interface MFAVerifyBody {
-  userId: string;
+  /** Short-lived pending token issued by /auth/login after the password check. */
+  mfaToken: string;
+  /** The 6-digit TOTP code from the user's authenticator app. */
   token: string;
 }
 
@@ -36,6 +38,8 @@ export interface AuthResponse {
   token?: string; // Optional if MFA is required
   user: { id: string; email: string; name: string | null };
   mfaRequired?: boolean;
+  /** Present only when mfaRequired: pass to /auth/mfa/login-verify to finish login. */
+  mfaToken?: string;
   role?: Role;
   companyId?: string;
   /** All companies/roles for this user (for company switcher) */

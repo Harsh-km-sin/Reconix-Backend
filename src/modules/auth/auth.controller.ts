@@ -145,16 +145,16 @@ export const authController = {
 
   async loginVerifyMFA(req: Request, res: Response): Promise<void> {
     try {
-      const { userId, token } = req.body;
-      if (!userId || !token) {
-        sendError(res, ErrorCode.VALIDATION_ERROR, "User ID and code are required", HttpStatus.BAD_REQUEST);
+      const { mfaToken, token } = req.body;
+      if (!mfaToken || !token) {
+        sendError(res, ErrorCode.VALIDATION_ERROR, "MFA session token and code are required", HttpStatus.BAD_REQUEST);
         return;
       }
-      const result = await authService.verifyMFALogin({ userId, token });
+      const result = await authService.verifyMFALogin({ mfaToken, token });
 
       await auditService.record({
         companyId: result.companyId || "SYSTEM",
-        userId: userId,
+        userId: result.user.id,
         action: "USER_LOGIN_MFA",
         ipAddress: req.ip,
         userAgent: req.headers["user-agent"],
