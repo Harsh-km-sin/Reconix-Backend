@@ -5,6 +5,47 @@ import { roundCurrency } from "../../utils/financialMath.js";
 import type { ReversalConfig, ReversalLineConfig } from "../../modules/job/job.interface.js";
 
 /**
+ * Codes of accounts we can POSITIVELY confirm are not inventory accounts.
+ *
+ * We key off "known non-inventory" rather than "known inventory" so the fallback
+ * is fail-safe: if an account's type hasn't been synced yet (`xeroType` NULL),
+ * it is treated as potentially-inventory and its AccountCode is omitted.
+ */
+async function resolveNonInventoryCodes(companyId: string, lines: any[]): Promise<Set<string>> {
+  const codes = [...new Set(lines.map((li) => li.AccountCode).filter(Boolean))] as string[];
+  if (codes.length === 0) return new Set();
+  const accounts = await prisma.xeroAccount.findMany({
+    where: { companyId, code: { in: codes } },
+    select: { code: true, xeroType: true },
+  });
+  return new Set(
+    accounts.filter((a) => a.xeroType && a.xeroType !== "INVENTORY").map((a) => a.code)
+  );
+}
+
+/**
+ * Account/item coding for a reversal line.
+ *
+ * Xero refuses to post directly to an inventory asset account — it fails with
+ * "You cannot save this transaction using an inventory account type". Lines that
+ * originate from a tracked inventory item carry an ItemCode, and Xero derives the
+ * account from the item itself.
+ *
+ * - Plain line (no ItemCode)              → AccountCode as-is.
+ * - Item line on a confirmed non-inventory
+ *   account (untracked item + override)   → ItemCode + AccountCode (preserve it).
+ * - Item line on an inventory OR unknown
+ *   account                               → ItemCode only (safe; Xero resolves it).
+ */
+function lineCoding(li: any, nonInventoryCodes: Set<string>): Record<string, unknown> {
+  if (!li.ItemCode) return { AccountCode: li.AccountCode };
+  if (li.AccountCode && nonInventoryCodes.has(li.AccountCode)) {
+    return { ItemCode: li.ItemCode, AccountCode: li.AccountCode };
+  }
+  return { ItemCode: li.ItemCode };
+}
+
+/**
  * Reverse an invoice by creating an ACCPAYCREDIT credit note and allocating it
  * back to the original invoice.
  *
@@ -33,6 +74,10 @@ export const handleInvoiceReversalItem = async (
     const allLines: any[] = rawJson.LineItems ?? [];
     const isPartial = reversalConfig?.reversalType === "PARTIAL";
 
+    // Which of the referenced accounts are confirmed non-inventory? Drives
+    // whether a line's AccountCode can safely be forwarded (see lineCoding).
+    const nonInventoryCodes = await resolveNonInventoryCodes(item.companyId, allLines);
+
     let reversalLines: any[];
 
     if (isPartial && reversalConfig.lineConfigs && reversalConfig.lineConfigs.length > 0) {
@@ -49,7 +94,7 @@ export const handleInvoiceReversalItem = async (
             Description: config.description ?? `Reversal of ${item.invoiceNumber}: ${li.Description}`,
             Quantity: config.quantity ?? li.Quantity ?? 1,
             UnitAmount: config.unitAmount ?? li.UnitAmount ?? 0,
-            AccountCode: li.AccountCode,
+            ...lineCoding(li, nonInventoryCodes),
             TaxType: li.TaxType,
             Tracking: li.Tracking ?? [],
           };
@@ -90,7 +135,7 @@ export const handleInvoiceReversalItem = async (
         Description: `Partial Reversal of ${item.invoiceNumber}: ${li.Description ?? ""}`,
         Quantity: li.Quantity ?? 1,
         UnitAmount: parseFloat((Number(li.UnitAmount) * scale).toFixed(4)),
-        AccountCode: li.AccountCode,
+        ...lineCoding(li, nonInventoryCodes),
         TaxType: li.TaxType,
         Tracking: li.Tracking ?? [],
       }));
@@ -100,7 +145,7 @@ export const handleInvoiceReversalItem = async (
         Description: `Reversal of ${item.invoiceNumber}: ${li.Description ?? ""}`,
         Quantity: li.Quantity ?? 1,
         UnitAmount: li.UnitAmount ?? 0,
-        AccountCode: li.AccountCode,
+        ...lineCoding(li, nonInventoryCodes),
         TaxType: li.TaxType,
         Tracking: li.Tracking ?? [],
       }));

@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from "uuid";
 import axios from "axios";
 import { env, logger, prisma, redis } from "../../../config/index.js";
 import { cryptoUtils } from "../../../utils/crypto.js";
+import { getXeroClient } from "../../../config/xeroClient.js";
 import { ADMIN_ROLE_NAME } from "../../../types/permissions.js";
 import { syncQueue } from "../../../jobs/queues.js";
 import { SyncJobType } from "../../../jobs/workers/syncWorker.js";
@@ -228,8 +229,11 @@ export const authController = {
                 return;
             }
 
+            // Include INACTIVE connections too. A connection is deactivated when
+            // Xero rejects its refresh token; hiding it would leave the user with
+            // no way to see the breakage or reconnect. The UI renders isActive.
             const connections = await prisma.xeroConnection.findMany({
-                where: { userId: authedReq.user.userId, isActive: true },
+                where: { userId: authedReq.user.userId },
                 select: {
                     tenantId: true,
                     tenantName: true,
@@ -308,13 +312,41 @@ export const authController = {
                 return;
             }
 
-            try {
-                const accessToken = cryptoUtils.decrypt(connection.accessToken, env.tokenEncryptionKey);
-                await axios.delete(`https://api.xero.com/connections/${tenantId}`, {
-                    headers: { Authorization: `Bearer ${accessToken}` },
-                });
-            } catch (revError) {
-                logger.warn("Failed to revoke Xero connection on Xero side", { tenantId });
+            // Revoke on Xero's side so the app disappears from the org's connected
+            // apps (Xero Developer → Connection management).
+            //
+            // IMPORTANT: Xero's disconnect endpoint takes the CONNECTION id, not the
+            // tenantId — they are different GUIDs. We resolve it from GET /connections.
+            // getXeroClient is used so an expiring access token is refreshed first.
+            let revoked = false;
+            let revokeError: string | null = null;
+
+            if (!connection.isActive) {
+                revokeError = "Connection was already inactive in Xero; nothing to revoke";
+            } else {
+                try {
+                    const xero = await getXeroClient(tenantId);
+                    // Absolute URL: /connections lives outside the api.xro/2.0 base path.
+                    const { data } = await xero.get("https://api.xero.com/connections");
+                    const match = Array.isArray(data)
+                        ? data.find((c: any) => c.tenantId === tenantId)
+                        : null;
+
+                    if (match?.id) {
+                        await xero.delete(`https://api.xero.com/connections/${match.id}`);
+                        revoked = true;
+                    } else {
+                        // Already gone from Xero (revoked there, or never present).
+                        revoked = true;
+                        revokeError = "Connection was no longer present in Xero";
+                    }
+                } catch (revError: any) {
+                    revokeError =
+                        revError?.response?.data?.Detail ??
+                        revError?.message ??
+                        "Failed to revoke connection in Xero";
+                    logger.warn("Failed to revoke Xero connection on Xero side", { tenantId, revokeError });
+                }
             }
 
             await prisma.xeroConnection.delete({ where: { tenantId } });
@@ -326,11 +358,18 @@ export const authController = {
                 resourceType: "XeroConnection",
                 resourceId: tenantId,
                 beforeState: { tenantName: connection.tenantName },
+                afterState: { revokedInXero: revoked, revokeError },
                 ipAddress: req.ip,
                 userAgent: req.headers["user-agent"],
             });
 
-            sendSuccess(res, { message: "Disconnected successfully" });
+            sendSuccess(res, {
+                message: revoked
+                    ? "Disconnected from Xero"
+                    : "Removed from Reconix, but the connection could not be revoked in Xero — remove it manually under Connection management.",
+                revoked,
+                revokeError,
+            });
         } catch (err) {
             logger.error("Failed to disconnect Xero organization", { err });
             sendError(res, ErrorCode.INTERNAL_ERROR, "Failed to disconnect");

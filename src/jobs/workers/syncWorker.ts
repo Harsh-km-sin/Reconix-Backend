@@ -169,8 +169,28 @@ async function runSync(tenantId: string, companyId: string, job: Job, since?: Da
 // Sync Implementations
 // ---------------------------------------------------------------------------
 
+/**
+ * Accounts sync incrementally like everything else, with one guard: if any of
+ * this company's accounts is missing its raw Xero type (rows stored before the
+ * `xeroType` column existed), we force a full pull to backfill it. Otherwise
+ * If-Modified-Since would return nothing and `xeroType` would stay NULL forever,
+ * leaving the reversal handler unable to identify inventory accounts.
+ *
+ * The guard is self-healing and costs one COUNT per sync.
+ */
 async function syncAccounts(xero: any, companyId: string, since?: Date) {
-    const response = await xero.get("/Accounts", reqConfig(since));
+    let effectiveSince = since;
+    if (since) {
+        const missingType = await prisma.xeroAccount.count({
+            where: { companyId, xeroType: null },
+        });
+        if (missingType > 0) {
+            logger.info(`Backfilling xeroType for ${missingType} accounts — forcing full account pull`, { companyId });
+            effectiveSince = undefined;
+        }
+    }
+
+    const response = await xero.get("/Accounts", reqConfig(effectiveSince));
     const accounts = response.data?.Accounts ?? [];
 
     for (const account of accounts) {
@@ -185,6 +205,7 @@ async function syncAccounts(xero: any, companyId: string, since?: Date) {
                 code: account.Code,
                 name: account.Name,
                 type: mapAccountType(account.Type),
+                xeroType: account.Type,
                 currencyCode: account.CurrencyCode || "USD",
                 taxType: account.TaxType,
                 isActive: account.Status === "ACTIVE",
@@ -196,6 +217,7 @@ async function syncAccounts(xero: any, companyId: string, since?: Date) {
                 code: account.Code,
                 name: account.Name,
                 type: mapAccountType(account.Type),
+                xeroType: account.Type,
                 currencyCode: account.CurrencyCode || "USD",
                 taxType: account.TaxType,
                 isActive: account.Status === "ACTIVE",

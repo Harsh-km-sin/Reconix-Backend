@@ -249,6 +249,9 @@ model XeroAccount {
   code          String
   name          String
   type          AccountType
+  /// Xero's exact account type (e.g. "INVENTORY", "FIXED", "PREPAYMENT").
+  /// Kept raw because `type` collapses many Xero types into OTHER.
+  xeroType      String?     @map("xero_type")
   currencyCode  String?     @map("currency_code")
   taxType       String?     @map("tax_type")
   isActive      Boolean     @default(true) @map("is_active")

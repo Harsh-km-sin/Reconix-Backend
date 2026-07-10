@@ -26,6 +26,26 @@ export const syncController = {
             const full = (req.body as { full?: boolean })?.full === true;
             const type = full ? SyncJobType.FULL_SYNC : SyncJobType.INCREMENTAL_SYNC;
 
+            // Fail fast with a clear, actionable message rather than enqueueing a
+            // job that will throw deep in the worker.
+            const conn = await prisma.xeroConnection.findUnique({
+                where: { tenantId },
+                select: { isActive: true },
+            });
+            if (!conn) {
+                sendError(res, ErrorCode.NOT_FOUND, "Xero connection not found for this company", HttpStatus.NOT_FOUND);
+                return;
+            }
+            if (!conn.isActive) {
+                sendError(
+                    res,
+                    ErrorCode.VALIDATION_ERROR,
+                    "This Xero connection has expired and must be reconnected before syncing.",
+                    HttpStatus.BAD_REQUEST
+                );
+                return;
+            }
+
             // Per-tenant lock so a second trigger can't run an overlapping sync.
             // The worker releases it on completion; the TTL is a crash backstop.
             const acquired = await redis.set(syncLockKey(tenantId), "1", "EX", 900, "NX");
@@ -64,10 +84,14 @@ export const syncController = {
                 return;
             }
 
+            const state = await job.getState();
             sendSuccess(res, {
                 id: job.id,
                 progress: job.progress,
-                status: await job.getState(),
+                status: state,
+                // Surface WHY it failed so the UI can show something actionable
+                // instead of a generic "Sync failed".
+                failedReason: state === "failed" ? job.failedReason ?? null : null,
             });
         } catch (err) {
             logger.error("Failed to get sync status", { err });
