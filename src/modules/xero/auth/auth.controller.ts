@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from "uuid";
 import axios from "axios";
 import { env, logger, prisma, redis } from "../../../config/index.js";
 import { cryptoUtils } from "../../../utils/crypto.js";
+import { ADMIN_ROLE_NAME } from "../../../types/permissions.js";
 import { syncQueue } from "../../../jobs/queues.js";
 import { SyncJobType } from "../../../jobs/workers/syncWorker.js";
 import { sendSuccess, sendError, ErrorCode, HttpStatus } from "../../../types/api.types.js";
@@ -130,6 +131,12 @@ export const authController = {
             const encryptedAccessToken = cryptoUtils.encrypt(access_token, env.tokenEncryptionKey);
             const encryptedRefreshToken = cryptoUtils.encrypt(refresh_token, env.tokenEncryptionKey);
 
+            // The connecting user becomes an Administrator of each connected company.
+            const adminRole = await prisma.role.findUnique({ where: { name: ADMIN_ROLE_NAME } });
+            if (!adminRole) {
+                throw new Error("Administrator role not found — run the RBAC seed");
+            }
+
             // Process each tenant (usually just one, but Xero allows multiple)
             for (const tenant of tenants) {
                 // 4. Ensure Company record exists
@@ -154,7 +161,7 @@ export const authController = {
                     create: {
                         userId,
                         companyId: dbCompany.id,
-                        role: "ADMIN",
+                        roleId: adminRole.id,
                     },
                 });
 
@@ -240,6 +247,19 @@ export const authController = {
                                     xeroOverpayments: true,
                                 },
                             },
+                            // Latest sync run, for a "last sync result" summary.
+                            syncLogs: {
+                                orderBy: { startedAt: "desc" },
+                                take: 1,
+                                select: {
+                                    syncType: true,
+                                    status: true,
+                                    recordsFetched: true,
+                                    startedAt: true,
+                                    completedAt: true,
+                                    errorMessage: true,
+                                },
+                            },
                         },
                     },
                 },
@@ -257,6 +277,7 @@ export const authController = {
                 invoiceCount: c.company?._count.xeroInvoices || 0,
                 contactCount: c.company?._count.xeroContacts || 0,
                 overpaymentCount: c.company?._count.xeroOverpayments || 0,
+                lastSync: c.company?.syncLogs[0] ?? null,
             }));
 
             sendSuccess(res, mappedConnections);

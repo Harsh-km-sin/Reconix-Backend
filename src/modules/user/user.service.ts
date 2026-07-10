@@ -4,7 +4,6 @@ import { authService } from "../auth/auth.service.js";
 import { emailService } from "../../services/email.service.js";
 import { logAudit } from "../../helpers/audit.helper.js";
 import type { InviteUserInput, UpdateProfileInput } from "./user.validation.js";
-import type { Role } from "@prisma/client";
 import type { Prisma } from "@prisma/client";
 
 /** Select for User profile (Settings). Schema has phoneNumber, timezone, dateFormat, preferences. Run `npx prisma generate` if TypeScript errors. */
@@ -79,7 +78,7 @@ export const userService = {
       await authRepository.addRoleToUser({
         userId: user.id,
         companyId: a.companyId,
-        role: a.role as Role,
+        roleId: a.roleId,
         grantedByUserId,
       });
     }

@@ -3,7 +3,6 @@ import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import { generateSecret, verify, generateURI } from "otplib";
 import qrcode from "qrcode";
-import type { Role } from "@prisma/client";
 import { env } from "../../config/index.js";
 import { prisma } from "../../config/index.js";
 import { cryptoUtils } from "../../utils/crypto.js";
@@ -16,7 +15,7 @@ import type {
   MFAVerifyBody,
   MFASetupResponse
 } from "./auth.interface.js";
-import { getPermissionsForRole } from "../../types/permissions.js";
+import { permissionService } from "../permission/permission.service.js";
 
 const SALT_ROUNDS = 10;
 
@@ -67,24 +66,14 @@ function decryptSecret(stored: string): string {
   return cryptoUtils.decrypt(stored, env.tokenEncryptionKey);
 }
 
-type RoleWithCompany = { companyId: string; company: { id: string; name: string }; role: Role };
+type RoleWithCompany = {
+  companyId: string;
+  roleId: string;
+  company: { id: string; name: string };
+  role: { id: string; name: string };
+};
 
-/**
- * The companies a user may act on are ONLY those they have an explicit
- * UserCompanyRole for. An ADMIN role is scoped to its own company like any
- * other role — it does not grant access to every tenant in the system.
- * (A platform-wide super-admin, if ever needed, should be a separate concept.)
- */
-async function getCompaniesForResponse(
-  _role: Role | undefined,
-  assignedRoles: RoleWithCompany[]
-): Promise<{ companyId: string; companyName: string; role: Role }[]> {
-  return assignedRoles.map((r) => ({
-    companyId: r.companyId,
-    companyName: r.company.name,
-    role: r.role,
-  }));
-}
+type SessionContext = { roleId: string; roleName: string; companyId: string };
 
 function signToken(payload: AuthTokenPayload): string {
   return jwt.sign(payload, env.jwtSecret, {
@@ -92,30 +81,62 @@ function signToken(payload: AuthTokenPayload): string {
   });
 }
 
-function determineInitialCompanyContext(user: any): { role: Role, companyId: string } | null {
+/**
+ * Pick the company/role context to activate: the user's last active company if
+ * they still hold a role there, else their first assigned role. Access is always
+ * tied to an explicit UserCompanyRole entry.
+ */
+function determineInitialCompanyContext(user: any): SessionContext | null {
   const prefs = user.preferences as Record<string, any> | null;
   const lastActiveCompanyId = prefs?.lastActiveCompanyId;
   const roles = (user.userCompanyRoles || []) as RoleWithCompany[];
+  const pick = (r: RoleWithCompany): SessionContext => ({
+    roleId: r.roleId,
+    roleName: r.role.name,
+    companyId: r.companyId,
+  });
 
-  // Prefer the user's last active company, but only if they still hold a role
-  // there. Access is always tied to an explicit UserCompanyRole entry.
   if (lastActiveCompanyId) {
-      const roleEntry = roles.find(r => r.companyId === lastActiveCompanyId);
-      if (roleEntry) {
-          return { role: roleEntry.role, companyId: roleEntry.companyId };
-      }
+    const roleEntry = roles.find((r) => r.companyId === lastActiveCompanyId);
+    if (roleEntry) return pick(roleEntry);
   }
-
-  // Fallback to first available role
   const firstRole = roles[0];
-  if (firstRole) {
-      return {
-          role: firstRole.role,
-          companyId: firstRole.companyId
-      };
-  }
+  return firstRole ? pick(firstRole) : null;
+}
 
-  return null;
+/**
+ * Build the full authenticated session response: resolve the role's permissions
+ * (DB-driven), bake { roleId, roleName, companyId, permissions } into the JWT,
+ * and list the companies the user can switch between.
+ */
+async function buildAuthResponse(
+  user: { id: string; email: string; name: string | null },
+  ctx: SessionContext | null,
+  roles: RoleWithCompany[]
+): Promise<AuthResponse> {
+  const permissions = await permissionService.resolvePermissions(ctx?.roleId);
+  const payload: AuthTokenPayload = {
+    userId: user.id,
+    email: user.email,
+    roleId: ctx?.roleId,
+    roleName: ctx?.roleName,
+    companyId: ctx?.companyId,
+    permissions,
+  };
+  const token = signToken(payload);
+  const displayName = user.name?.trim() || user.email.split("@")[0] || "User";
+  return {
+    token,
+    user: { id: user.id, email: user.email, name: displayName },
+    roleId: ctx?.roleId,
+    role: ctx?.roleName,
+    companyId: ctx?.companyId,
+    companies: roles.map((r) => ({
+      companyId: r.companyId,
+      companyName: r.company.name,
+      role: r.role.name,
+    })),
+  };
 }
 
 export const authService = {
@@ -145,28 +166,7 @@ export const authService = {
     }
 
     const context = determineInitialCompanyContext(user);
-    const effectiveRole = context?.role;
-    const effectiveCompanyId = context?.companyId;
-
-    const permissions = getPermissionsForRole(effectiveRole);
-    const payload: AuthTokenPayload = {
-      userId: user.id,
-      email: user.email,
-      role: effectiveRole,
-      companyId: effectiveCompanyId,
-      permissions,
-    };
-    const companies = await getCompaniesForResponse(effectiveRole, user.userCompanyRoles ?? []);
-    const token = signToken(payload);
-    const displayName = user.name?.trim() || user.email.split("@")[0] || "User";
-    
-    return {
-      token,
-      user: { id: user.id, email: user.email, name: displayName },
-      role: effectiveRole,
-      companyId: effectiveCompanyId,
-      companies,
-    };
+    return buildAuthResponse(user, context, user.userCompanyRoles ?? []);
   },
 
   async verifyMFALogin(body: MFAVerifyBody): Promise<AuthResponse> {
@@ -189,30 +189,11 @@ export const authService = {
     // Refresh user with roles
     const fullUser = await authRepository.findByEmail(user.email);
     const context = determineInitialCompanyContext(fullUser);
-    const effectiveRole = context?.role;
-    const effectiveCompanyId = context?.companyId;
-
-    const permissions = getPermissionsForRole(effectiveRole);
-    
-    const payload: AuthTokenPayload = {
-      userId: user.id,
-      email: user.email,
-      role: effectiveRole,
-      companyId: effectiveCompanyId,
-      permissions,
-    };
-    
-    const companies = await getCompaniesForResponse(effectiveRole, fullUser?.userCompanyRoles ?? []);
-    const token = signToken(payload);
-    const displayName = user.name?.trim() || user.email.split("@")[0] || "User";
-
-    return {
-      token,
-      user: { id: user.id, email: user.email, name: displayName },
-      role: effectiveRole,
-      companyId: effectiveCompanyId,
-      companies,
-    };
+    return buildAuthResponse(
+      { id: user.id, email: user.email, name: user.name },
+      context,
+      (fullUser?.userCompanyRoles as RoleWithCompany[]) ?? []
+    );
   },
 
   async setupMFA(userId: string): Promise<MFASetupResponse> {
@@ -260,27 +241,11 @@ export const authService = {
     }
     const withRoles = await authRepository.findByEmail(updated.email);
     const context = determineInitialCompanyContext(withRoles);
-    const effectiveRole = context?.role;
-    const effectiveCompanyId = context?.companyId;
-
-    const permissions = getPermissionsForRole(effectiveRole);
-    const payload: AuthTokenPayload = {
-      userId: updated.id,
-      email: updated.email,
-      role: effectiveRole,
-      companyId: effectiveCompanyId,
-      permissions,
-    };
-    const companies = await getCompaniesForResponse(effectiveRole, withRoles?.userCompanyRoles ?? []);
-    const token = signToken(payload);
-    const displayName = updated.name?.trim() || updated.email.split("@")[0] || "User";
-    return {
-      token,
-      user: { id: updated.id, email: updated.email, name: displayName },
-      role: effectiveRole,
-      companyId: effectiveCompanyId,
-      companies,
-    };
+    return buildAuthResponse(
+      updated,
+      context,
+      (withRoles?.userCompanyRoles as RoleWithCompany[]) ?? []
+    );
   },
 
   generateInviteToken(): { token: string; expiresAt: Date } {
@@ -294,11 +259,10 @@ export const authService = {
     const user = await authRepository.findByIdWithRoles(userId);
     if (!user) throw new Error("User not found");
 
-    const roles = user.userCompanyRoles as RoleWithCompany[];
+    const roles = (user.userCompanyRoles ?? []) as RoleWithCompany[];
     const roleEntry = roles.find((r) => r.companyId === targetCompanyId);
 
-    // Access requires an explicit role for the target company. ADMIN of one
-    // company does NOT imply access to others.
+    // Access requires an explicit role for the target company.
     if (!roleEntry) {
       throw new Error("Access denied to this company");
     }
@@ -311,25 +275,11 @@ export const authService = {
     const prefs = (user.preferences as Record<string, any>) || {};
     await authRepository.updatePreferences(userId, { ...prefs, lastActiveCompanyId: targetCompanyId });
 
-    const effectiveRole = roleEntry.role;
-    const permissions = getPermissionsForRole(effectiveRole);
-    const payload: AuthTokenPayload = {
-      userId: user.id,
-      email: user.email,
-      role: effectiveRole,
-      companyId: targetCompanyId,
-      permissions,
-    };
-    const companies = await getCompaniesForResponse(effectiveRole, roles);
-    const token = signToken(payload);
-    const displayName = user.name?.trim() || user.email.split("@")[0] || "User";
-    return {
-      token,
-      user: { id: user.id, email: user.email, name: displayName },
-      role: effectiveRole,
-      companyId: targetCompanyId,
-      companies,
-    };
+    return buildAuthResponse(
+      user,
+      { roleId: roleEntry.roleId, roleName: roleEntry.role.name, companyId: targetCompanyId },
+      roles
+    );
   },
 
   async changePassword(userId: string, currentPassword: string, newPassword: string): Promise<void> {

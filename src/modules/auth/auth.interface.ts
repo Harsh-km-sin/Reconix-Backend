@@ -1,7 +1,3 @@
-import type { Role } from "@prisma/client";
-
-export type { Role };
-
 export interface LoginBody {
   email: string;
   password: string;
@@ -24,11 +20,12 @@ export interface MFASetupResponse {
   qrCodeUrl: string;
 }
 
-/** JWT payload; includes role and permissions for access control */
+/** JWT payload; includes role identity and resolved permissions for access control */
 export interface AuthTokenPayload {
   userId: string;
   email: string;
-  role?: Role;
+  roleId?: string;
+  roleName?: string;
   companyId?: string;
   permissions: string[];
 }
@@ -40,8 +37,10 @@ export interface AuthResponse {
   mfaRequired?: boolean;
   /** Present only when mfaRequired: pass to /auth/mfa/login-verify to finish login. */
   mfaToken?: string;
-  role?: Role;
+  roleId?: string;
+  /** Role name (display + coarse checks). Authorization uses the permissions[] in the JWT. */
+  role?: string;
   companyId?: string;
   /** All companies/roles for this user (for company switcher) */
-  companies?: { companyId: string; companyName: string; role: Role }[];
+  companies?: { companyId: string; companyName: string; role: string }[];
 }

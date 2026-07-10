@@ -4,7 +4,6 @@ import { Prisma } from "@prisma/client";
 import { jobQueue } from "../../jobs/queues.js";
 import { sendSuccess, sendError, ErrorCode, HttpStatus } from "../../types/api.types.js";
 import { AuthUser } from "../../types/express.js";
-import { CAPABILITIES, hasPermission } from "../../types/permissions.js";
 import { auditService } from "../audit/audit.service.js";
 import type { CreateJobBody, AddItemsBody, AutomationJobPayload } from "./job.interface.js";
 
@@ -240,10 +239,6 @@ export const jobController = {
                 return;
             }
 
-            if (authedReq.user.role !== "ADMIN") {
-                sendError(res, ErrorCode.FORBIDDEN, "Only ADMIN can delete jobs", HttpStatus.FORBIDDEN);
-                return;
-            }
 
             const { jobId } = req.params;
             const job = await prisma.job.findUnique({ where: { id: jobId } });
@@ -444,12 +439,6 @@ export const jobController = {
                 return;
             }
 
-            const role = authedReq.user.role;
-            if (role !== "ADMIN" && role !== "APPROVER") {
-                sendError(res, ErrorCode.FORBIDDEN, "Only ADMIN or APPROVER can approve jobs", HttpStatus.FORBIDDEN);
-                return;
-            }
-
             const { jobId } = req.params;
             const job = await prisma.job.findUnique({ where: { id: jobId } });
 
@@ -458,17 +447,9 @@ export const jobController = {
                 return;
             }
 
-            // --- Four-Eyes Principle Enforcement ---
-            // A creator may approve their own job ONLY if their role carries the
-            // self-approve capability (jobs:self-approve). ADMIN has it by default
-            // (full control); APPROVER/OPERATOR do not, so they still require a
-            // separate approver. Toggle per role in ROLE_CAPABILITIES.
-            const isSelfApproval = job.createdByUserId === authedReq.user.userId;
-            const canSelfApprove = hasPermission(authedReq.user.permissions ?? [], CAPABILITIES.SELF_APPROVE_JOBS);
-            if (isSelfApproval && !canSelfApprove) {
-                sendError(res, ErrorCode.FORBIDDEN, "Four-Eyes Principle: you cannot approve a job you created", HttpStatus.FORBIDDEN);
-                return;
-            }
+            // Authorization is handled by requirePermission('jobs:approve') on the
+            // route. Four-eyes is no longer a hardcoded rule — an org enforces it
+            // (if desired) by not granting jobs:approve to job creators.
 
             if (job.status !== "PENDING") {
                 sendError(res, ErrorCode.VALIDATION_ERROR, `Job is already in ${job.status} status`, HttpStatus.BAD_REQUEST);

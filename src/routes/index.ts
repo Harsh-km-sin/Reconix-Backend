@@ -7,6 +7,7 @@ import { jobRoutes } from "../modules/job/job.routes.js";
 import { auditRoutes } from "../modules/audit/audit.routes.js";
 import { excelRoutes } from "../modules/excel/excel.routes.js";
 import { validationRoutes } from "../modules/validation/validation.routes.js";
+import { permissionRoutes, roleRoutes } from "../modules/permission/permission.routes.js";
 
 const router: Router = Router();
 
@@ -18,5 +19,7 @@ router.use("/jobs", jobRoutes);
 router.use("/audit", auditRoutes);
 router.use("/excel", excelRoutes);
 router.use("/validation", validationRoutes);
+router.use("/permissions", permissionRoutes);
+router.use("/roles", roleRoutes);
 
 export const routes = router;

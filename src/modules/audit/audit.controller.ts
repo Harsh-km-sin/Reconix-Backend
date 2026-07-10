@@ -20,11 +20,6 @@ export const auditController = {
         return;
       }
 
-      if (authedReq.user.role !== "ADMIN") {
-        sendError(res, ErrorCode.FORBIDDEN, "Only ADMIN can view audit logs", HttpStatus.FORBIDDEN);
-        return;
-      }
-
       const {
         userId,
         action,

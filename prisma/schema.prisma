@@ -11,11 +11,8 @@ datasource db {
 // Enums
 // ---------------------------------------------------------------------------
 
-enum Role {
-  ADMIN
-  APPROVER
-  OPERATOR
-}
+// Role is a database table (see model Role) so roles are fully configurable at
+// runtime — no enum. AccountType etc. remain enums as they are fixed domains.
 
 enum AccountType {
   BANK
@@ -65,6 +62,7 @@ enum SyncType {
   INVOICES
   OVERPAYMENTS
   FULL
+  INCREMENTAL
 }
 
 enum SyncLogStatus {
@@ -139,16 +137,61 @@ model UserCompanyRole {
   id              String    @id @default(cuid())
   userId          String    @map("user_id")
   companyId       String    @map("company_id")
-  role            Role
+  roleId          String    @map("role_id")
   grantedByUserId String?   @map("granted_by_user_id")
   grantedAt       DateTime? @map("granted_at")
 
   user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
   company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  role      Role    @relation(fields: [roleId], references: [id], onDelete: Restrict)
   grantedBy User?   @relation("GrantedBy", fields: [grantedByUserId], references: [id], onDelete: SetNull)
 
   @@unique([userId, companyId])
+  @@index([roleId])
   @@map("user_company_roles")
+}
+
+// ---------------------------------------------------------------------------
+// RBAC — database-driven, runtime-editable roles + role → permission mapping
+// ---------------------------------------------------------------------------
+
+model Role {
+  id          String   @id @default(cuid())
+  name        String   @unique // e.g. "Administrator", "Job Creator"
+  description String?
+  isSystem    Boolean  @default(false) @map("is_system") // built-in; cannot be deleted
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  rolePermissions  RolePermission[]
+  userCompanyRoles UserCompanyRole[]
+
+  @@map("roles")
+}
+
+model Permission {
+  id          String   @id @default(cuid())
+  key         String   @unique // e.g. "jobs:approve"
+  category    String? // grouping for the admin UI, e.g. "jobs"
+  description String?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  rolePermissions RolePermission[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  id           String @id @default(cuid())
+  roleId       String @map("role_id")
+  permissionId String @map("permission_id")
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@unique([roleId, permissionId])
+  @@index([roleId])
+  @@map("role_permissions")
 }
 
 model XeroConnection {

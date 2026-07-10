@@ -53,6 +53,7 @@ router.get("/connections", authMiddleware, authController.getConnections);
 router.delete("/connections/:tenantId", authMiddleware, authController.disconnect);
 router.post("/sync/:tenantId", authMiddleware, syncController.triggerSync);
 router.get("/sync/status/:jobId", authMiddleware, syncController.getSyncStatus);
+router.get("/sync/history/:tenantId", authMiddleware, syncController.getSyncHistory);
 
 // --- Data Query APIs (serve from local DB mirror for job builder) ---
 router.get("/invoices", authMiddleware, invoiceController.getInvoices);

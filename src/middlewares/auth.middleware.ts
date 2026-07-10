@@ -16,7 +16,8 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
     req.user = {
       userId: decoded.userId,
       email: decoded.email,
-      role: decoded.role,
+      roleId: decoded.roleId,
+      roleName: decoded.roleName,
       companyId: decoded.companyId,
       permissions: decoded.permissions ?? [],
     };

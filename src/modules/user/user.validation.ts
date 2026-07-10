@@ -1,13 +1,10 @@
 import { z } from "zod";
-import { Role } from "@prisma/client";
 
 const emailSchema = z
   .string()
   .min(1, "Email is required")
   .email("Invalid email address")
   .transform((s) => s.trim().toLowerCase());
-
-const roleSchema = z.nativeEnum(Role);
 
 export const inviteUserSchema = z.object({
   email: emailSchema,
@@ -16,7 +13,7 @@ export const inviteUserSchema = z.object({
     .array(
       z.object({
         companyId: z.string().min(1, "Company ID is required"),
-        role: roleSchema,
+        roleId: z.string().min(1, "Role is required"),
       })
     )
     .default([]),

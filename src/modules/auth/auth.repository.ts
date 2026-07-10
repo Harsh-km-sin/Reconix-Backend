@@ -1,5 +1,4 @@
 import { prisma } from "../../config/index.js";
-import type { Role } from "@prisma/client";
 
 export const authRepository = {
   async findByEmail(email: string) {
@@ -7,7 +6,7 @@ export const authRepository = {
       where: { email: email.trim().toLowerCase() },
       include: {
         userCompanyRoles: {
-          include: { company: true },
+          include: { company: true, role: { select: { id: true, name: true } } },
           orderBy: { grantedAt: "desc" },
         },
       },
@@ -33,7 +32,7 @@ export const authRepository = {
   async findByInviteToken(token: string) {
     return prisma.user.findFirst({
       where: { inviteToken: token, isActive: true },
-      include: { userCompanyRoles: { include: { company: true } } },
+      include: { userCompanyRoles: { include: { company: true, role: { select: { id: true, name: true } } } } },
     });
   },
 
@@ -64,7 +63,7 @@ export const authRepository = {
       where: { id, isActive: true },
       include: {
         userCompanyRoles: {
-          include: { company: true },
+          include: { company: true, role: { select: { id: true, name: true } } },
           orderBy: { grantedAt: "desc" },
         },
       },
@@ -81,14 +80,14 @@ export const authRepository = {
   async addRoleToUser(data: {
     userId: string;
     companyId: string;
-    role: Role;
+    roleId: string;
     grantedByUserId?: string;
   }) {
     return prisma.userCompanyRole.create({
       data: {
         userId: data.userId,
         companyId: data.companyId,
-        role: data.role,
+        roleId: data.roleId,
         grantedByUserId: data.grantedByUserId,
         grantedAt: new Date(),
       },

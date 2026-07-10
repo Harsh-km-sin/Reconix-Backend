@@ -1,5 +1,5 @@
 import { Worker, Job } from "bullmq";
-import { env, logger, prisma } from "../../config/index.js";
+import { env, logger, prisma, redis } from "../../config/index.js";
 import { getXeroClient } from "../../config/xeroClient.js";
 
 const connection = {
@@ -14,6 +14,32 @@ export enum SyncJobType {
 }
 
 /**
+ * Xero's If-Modified-Since header expects a UTC datetime with no timezone
+ * suffix, e.g. "2026-07-10T05:59:01".
+ */
+function toXeroDate(d: Date): string {
+    return d.toISOString().replace(/\.\d{3}Z$/, "");
+}
+
+/**
+ * Axios request config carrying the incremental If-Modified-Since header.
+ * When `since` is undefined (full sync) it returns an empty config so Xero
+ * returns all records.
+ */
+/** Redis key for the per-tenant sync lock (prevents overlapping syncs). */
+export const syncLockKey = (tenantId: string) => `sync:lock:${tenantId}`;
+
+function reqConfig(since?: Date) {
+    if (!since) return {};
+    return {
+        headers: { "If-Modified-Since": toXeroDate(since) },
+        // Xero can reply 304 Not Modified when nothing changed since `since`;
+        // treat it as a successful empty result rather than an axios error.
+        validateStatus: (status: number) => (status >= 200 && status < 300) || status === 304,
+    };
+}
+
+/**
  * Worker to process Xero data synchronization jobs.
  */
 export const syncWorker = new Worker(
@@ -22,6 +48,7 @@ export const syncWorker = new Worker(
         const { type, tenantId } = job.data;
         logger.info(`Processing ${type} for tenant ${tenantId}`, { jobId: job.id });
 
+        let syncLogId: string | null = null;
         try {
             // Find company associated with this tenant
             const company = await prisma.company.findUnique({
@@ -34,70 +61,117 @@ export const syncWorker = new Worker(
 
             const companyId = company.id;
 
-            if (type === SyncJobType.FULL_SYNC) {
-                await handleFullSync(tenantId, companyId, job);
-            } else {
+            const isFull = type === SyncJobType.FULL_SYNC;
+            const isIncremental = type === SyncJobType.INCREMENTAL_SYNC;
+            if (!isFull && !isIncremental) {
                 logger.warn(`Unhandled sync job type: ${type}`);
+                return;
             }
+
+            // Open a SyncLog record for this run (audit trail / history).
+            const log = await prisma.syncLog.create({
+                data: { companyId, syncType: isFull ? "FULL" : "INCREMENTAL", status: "RUNNING" },
+            });
+            syncLogId = log.id;
+
+            // Incremental uses the last successful sync as the watermark; a
+            // first-ever sync (no watermark) transparently falls back to full.
+            let since: Date | undefined;
+            if (isIncremental) {
+                const conn = await prisma.xeroConnection.findUnique({ where: { tenantId } });
+                since = conn?.lastSyncedAt ?? undefined;
+            }
+
+            const total = await runSync(tenantId, companyId, job, since);
+
+            await prisma.syncLog.update({
+                where: { id: syncLogId },
+                data: { status: "COMPLETED", completedAt: new Date(), recordsFetched: total },
+            });
         } catch (err: any) {
             if (err.name === "XeroTokenExpiredError" || err.response?.status === 400) {
                 logger.error(`Sync failed due to invalid Xero tokens. User must re-authenticate.`, { tenantId });
                 await job.log("Sync failed: Xero connection expired or invalid. Please re-authenticate the company in settings.");
             }
             logger.error(`Sync job ${job.id} failed`, { err, tenantId, type });
+            if (syncLogId) {
+                await prisma.syncLog.update({
+                    where: { id: syncLogId },
+                    data: {
+                        status: "FAILED",
+                        completedAt: new Date(),
+                        errorMessage: String(err?.message ?? "Sync failed").slice(0, 500),
+                    },
+                }).catch(() => { /* best-effort */ });
+            }
             throw err;
+        } finally {
+            // Release the per-tenant sync lock acquired by the trigger endpoint.
+            await redis.del(syncLockKey(tenantId)).catch(() => { /* best-effort */ });
         }
     },
     { connection, concurrency: 5 }
 );
 
-async function handleFullSync(tenantId: string, companyId: string, job: Job) {
+/**
+ * Runs the sync pipeline. When `since` is provided (incremental), each Xero
+ * request carries an If-Modified-Since header so only records changed after that
+ * time are returned; when undefined, a full pull is performed.
+ *
+ * The next watermark is the moment this run STARTED (not finished), so records
+ * modified while the sync is in flight are still caught next time. Upserts are
+ * idempotent, so the small overlap is harmless. The watermark is only advanced
+ * on success.
+ */
+async function runSync(tenantId: string, companyId: string, job: Job, since?: Date) {
     const xero = await getXeroClient(tenantId);
+    const startedAt = new Date();
+    logger.info(
+        since ? `Incremental sync since ${toXeroDate(since)}` : "Full sync (no watermark)",
+        { tenantId, companyId }
+    );
 
-    // Define sync order to maintain relational integrity
-    // 1. Accounts
-    // 2. Tax Rates
-    // 3. Contacts
-    // 4. Invoices
-    // 5. Credit Notes
-    // 6. Overpayments
-
+    // Sync order maintains relational integrity: contacts before the documents
+    // that reference them (invoices / credit notes / overpayments).
+    let total = 0;
     await job.updateProgress(5);
-    await syncAccounts(xero, companyId);
+    total += await syncAccounts(xero, companyId, since);
 
     await job.updateProgress(15);
-    await syncTaxRates(xero, tenantId); // tenantId is still used here, as per original code
+    await syncTaxRates(xero, tenantId);
 
     await job.updateProgress(30);
-    await syncContacts(xero, companyId);
+    total += await syncContacts(xero, companyId, since);
 
     await job.updateProgress(60);
-    await syncInvoices(xero, companyId);
+    total += await syncInvoices(xero, companyId, since);
 
     await job.updateProgress(75);
-    await syncCreditNotes(xero, companyId);
+    total += await syncCreditNotes(xero, companyId, since);
 
     await job.updateProgress(85);
-    await syncOverpayments(xero, companyId);
+    total += await syncOverpayments(xero, companyId, since);
 
     await job.updateProgress(95);
-    await syncBankAccounts(xero, companyId);
+    total += await syncBankAccounts(xero, companyId, since);
 
+    // Advance the watermark to the start of this successful run.
     await prisma.xeroConnection.update({
         where: { tenantId },
-        data: { lastSyncedAt: new Date() },
+        data: { lastSyncedAt: startedAt },
     });
 
     await job.updateProgress(100);
+    return total;
 }
 
 // ---------------------------------------------------------------------------
 // Sync Implementations
 // ---------------------------------------------------------------------------
 
-async function syncAccounts(xero: any, companyId: string) {
-    const response = await xero.get("/Accounts");
-    const accounts = response.data.Accounts;
+async function syncAccounts(xero: any, companyId: string, since?: Date) {
+    const response = await xero.get("/Accounts", reqConfig(since));
+    const accounts = response.data?.Accounts ?? [];
 
     for (const account of accounts) {
         await prisma.xeroAccount.upsert({
@@ -130,19 +204,20 @@ async function syncAccounts(xero: any, companyId: string) {
         });
     }
     logger.info(`Synced ${accounts.length} accounts`, { companyId });
+    return accounts.length;
 }
 
 async function syncTaxRates(xero: any, tenantId: string) {
     // Tax rates sync logic here
 }
 
-async function syncContacts(xero: any, companyId: string) {
+async function syncContacts(xero: any, companyId: string, since?: Date) {
     let page = 1;
     let hasMore = true;
     let totalContacts = 0;
 
     while (hasMore) {
-        const response = await xero.get(`/Contacts?page=${page}`);
+        const response = await xero.get(`/Contacts?page=${page}`, reqConfig(since));
         const contacts = response.data.Contacts;
 
         if (!contacts || contacts.length === 0) {
@@ -191,15 +266,16 @@ async function syncContacts(xero: any, companyId: string) {
         }
     }
     logger.info(`Synced ${totalContacts} contacts`, { companyId });
+    return totalContacts;
 }
 
-async function syncInvoices(xero: any, companyId: string) {
+async function syncInvoices(xero: any, companyId: string, since?: Date) {
     let page = 1;
     let hasMore = true;
     let totalInvoices = 0;
 
     while (hasMore) {
-        const response = await xero.get(`/Invoices?Statuses=AUTHORISED,PAID,VOIDED&Where=${encodeURIComponent('Type=="ACCPAY"')}&page=${page}`);
+        const response = await xero.get(`/Invoices?Statuses=AUTHORISED,PAID,VOIDED&Where=${encodeURIComponent('Type=="ACCPAY"')}&page=${page}`, reqConfig(since));
         const invoices = response.data.Invoices;
 
         if (!invoices || invoices.length === 0) {
@@ -303,15 +379,16 @@ async function syncInvoices(xero: any, companyId: string) {
         }
     }
     logger.info(`Synced ${totalInvoices} invoices`, { companyId });
+    return totalInvoices;
 }
 
-async function syncCreditNotes(xero: any, companyId: string) {
+async function syncCreditNotes(xero: any, companyId: string, since?: Date) {
     let page = 1;
     let hasMore = true;
     let totalCreditNotes = 0;
 
     while (hasMore) {
-        const response = await xero.get(`/CreditNotes?page=${page}`);
+        const response = await xero.get(`/CreditNotes?page=${page}`, reqConfig(since));
         const creditNotes = response.data.CreditNotes;
 
         if (!creditNotes || creditNotes.length === 0) {
@@ -375,15 +452,16 @@ async function syncCreditNotes(xero: any, companyId: string) {
         }
     }
     logger.info(`Synced ${totalCreditNotes} credit notes`, { companyId });
+    return totalCreditNotes;
 }
 
-async function syncOverpayments(xero: any, companyId: string) {
+async function syncOverpayments(xero: any, companyId: string, since?: Date) {
     let page = 1;
     let hasMore = true;
     let totalOverpayments = 0;
 
     while (hasMore) {
-        const response = await xero.get(`/Overpayments?page=${page}`);
+        const response = await xero.get(`/Overpayments?page=${page}`, reqConfig(since));
         const overpayments = response.data.Overpayments;
 
         if (!overpayments || overpayments.length === 0) {
@@ -453,11 +531,12 @@ async function syncOverpayments(xero: any, companyId: string) {
         }
     }
     logger.info(`Synced ${totalOverpayments} overpayments`, { companyId });
+    return totalOverpayments;
 }
 
-async function syncBankAccounts(xero: any, companyId: string) {
-    const response = await xero.get("/Accounts?where=Type==\"BANK\"");
-    const accounts = response.data.Accounts;
+async function syncBankAccounts(xero: any, companyId: string, since?: Date) {
+    const response = await xero.get("/Accounts?where=Type==\"BANK\"", reqConfig(since));
+    const accounts = response.data?.Accounts ?? [];
 
     for (const acc of accounts) {
         await prisma.xeroBankAccount.upsert({
@@ -490,6 +569,7 @@ async function syncBankAccounts(xero: any, companyId: string) {
         });
     }
     logger.info(`Synced ${accounts.length} bank accounts`, { companyId });
+    return accounts.length;
 }
 
 function mapAccountType(xeroType: string): any {

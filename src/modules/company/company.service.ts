@@ -26,12 +26,15 @@ export const companyService = {
     }
     const roles = await prisma.userCompanyRole.findMany({
       where: { userId: ctx.userId },
-      include: { company: { select: { id: true, name: true } } },
+      include: {
+        company: { select: { id: true, name: true } },
+        role: { select: { name: true } },
+      },
     });
     return roles.map((r) => ({
       companyId: r.companyId,
       companyName: r.company.name,
-      role: r.role,
+      role: r.role.name,
     }));
   },
 
