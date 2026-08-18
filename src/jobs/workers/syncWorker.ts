@@ -9,7 +9,6 @@ const connection = {
 
 export enum SyncJobType {
     FULL_SYNC = "FULL_SYNC",
-    PARTIAL_SYNC = "PARTIAL_SYNC",
     INCREMENTAL_SYNC = "INCREMENTAL_SYNC",
 }
 
@@ -137,9 +136,6 @@ async function runSync(tenantId: string, companyId: string, job: Job, since?: Da
     await job.updateProgress(5);
     total += await syncAccounts(xero, companyId, since);
 
-    await job.updateProgress(15);
-    await syncTaxRates(xero, tenantId);
-
     await job.updateProgress(30);
     total += await syncContacts(xero, companyId, since);
 
@@ -227,10 +223,6 @@ async function syncAccounts(xero: any, companyId: string, since?: Date) {
     }
     logger.info(`Synced ${accounts.length} accounts`, { companyId });
     return accounts.length;
-}
-
-async function syncTaxRates(xero: any, tenantId: string) {
-    // Tax rates sync logic here
 }
 
 async function syncContacts(xero: any, companyId: string, since?: Date) {

@@ -36,6 +36,8 @@ audit and access control requirements (SOC2-aligned).
     { name: "Authentication", description: "Login and set-password (invite flow); returns JWT for protected endpoints" },
     { name: "Users", description: "User management; admin invites users and assigns roles/companies" },
     { name: "Excel", description: "Spreadsheet upload and parsing. The server owns parsing; clients do not read files themselves." },
+    { name: "RBAC", description: "Roles and the permission catalog. All endpoints require the roles:manage permission." },
+    { name: "Xero", description: "Xero connection and synchronisation" },
   ],
   paths: {
     "/health": {
@@ -245,6 +247,140 @@ audit and access control requirements (SOC2-aligned).
         },
       },
     },
+    "/permissions": {
+      get: {
+        tags: ["RBAC"],
+        summary: "List the permission catalog",
+        description: "Every permission key that can be granted to a role. Requires roles:manage.",
+        operationId: "listPermissions",
+        security: [{ BearerAuth: [] }],
+        responses: {
+          "200": {
+            description: "Assignable permissions",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    success: { type: "boolean", example: true },
+                    data: { type: "array", items: { $ref: "#/components/schemas/PermissionDef" } },
+                  },
+                },
+              },
+            },
+          },
+          "403": { description: "roles:manage required", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } },
+        },
+      },
+    },
+    "/roles": {
+      get: {
+        tags: ["RBAC"],
+        summary: "List roles",
+        description: "All roles with their resolved permission keys. Requires roles:manage.",
+        operationId: "listRoles",
+        security: [{ BearerAuth: [] }],
+        responses: {
+          "200": {
+            description: "Roles",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    success: { type: "boolean", example: true },
+                    data: { type: "array", items: { $ref: "#/components/schemas/Role" } },
+                  },
+                },
+              },
+            },
+          },
+          "403": { description: "roles:manage required", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } },
+        },
+      },
+      post: {
+        tags: ["RBAC"],
+        summary: "Create a role",
+        operationId: "createRole",
+        security: [{ BearerAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["name", "permissionKeys"],
+                properties: {
+                  name: { type: "string" },
+                  description: { type: "string", nullable: true },
+                  permissionKeys: { type: "array", items: { type: "string" } },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "Role created", content: { "application/json": { schema: { type: "object", properties: { success: { type: "boolean", example: true }, data: { $ref: "#/components/schemas/Role" } } } } } },
+          "403": { description: "roles:manage required", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } },
+        },
+      },
+    },
+    "/roles/{id}/permissions": {
+      put: {
+        tags: ["RBAC"],
+        summary: "Replace a role's permissions",
+        description:
+          "Sets the role's grants to exactly this list. System roles cannot be edited. " +
+          "Takes effect for a user on their next token issue (login or company switch).",
+        operationId: "setRolePermissions",
+        security: [{ BearerAuth: [] }],
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["permissionKeys"],
+                properties: { permissionKeys: { type: "array", items: { type: "string" } } },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "Updated role", content: { "application/json": { schema: { type: "object", properties: { success: { type: "boolean", example: true }, data: { $ref: "#/components/schemas/Role" } } } } } },
+          "403": { description: "roles:manage required, or role is a system role", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } },
+          "404": { description: "Role not found", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } },
+        },
+      },
+    },
+    "/xero/sync/history/{tenantId}": {
+      get: {
+        tags: ["Xero"],
+        summary: "Recent sync runs",
+        description: "Sync runs for a Xero tenant, most recent first. Used by the sync log viewer.",
+        operationId: "getSyncHistory",
+        security: [{ BearerAuth: [] }],
+        parameters: [{ name: "tenantId", in: "path", required: true, schema: { type: "string" }, description: "Xero tenant id." }],
+        responses: {
+          "200": {
+            description: "Sync runs",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    success: { type: "boolean", example: true },
+                    data: { type: "array", items: { $ref: "#/components/schemas/SyncLog" } },
+                  },
+                },
+              },
+            },
+          },
+          "401": { description: "Missing or invalid JWT", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } },
+        },
+      },
+    },
   },
   components: {
     securitySchemes: {
@@ -316,10 +452,15 @@ audit and access control requirements (SOC2-aligned).
               name: { type: "string", nullable: true },
             },
           },
+          roleId: {
+            type: "string",
+            description: "Id of the role active for this session. Roles are rows in the Role table, not a fixed enum.",
+          },
           role: {
             type: "string",
-            enum: ["ADMIN", "APPROVER", "OPERATOR"],
-            description: "Present when user has at least one company role.",
+            description:
+              "Display name of the active role, e.g. \"Administrator\". For display and coarse checks only — " +
+              "authorization is driven by the permissions[] claim inside the JWT, never by this string.",
           },
           companyId: {
             type: "string",
@@ -331,6 +472,52 @@ audit and access control requirements (SOC2-aligned).
             description: "Companies the user can access (for company switcher).",
           },
         },
+      },
+      PermissionDef: {
+        type: "object",
+        required: ["id", "key"],
+        properties: {
+          id: { type: "string" },
+          key: { type: "string", description: "e.g. \"jobs:write\", \"roles:manage\"." },
+          category: { type: "string", nullable: true },
+          description: { type: "string", nullable: true },
+        },
+      },
+      Role: {
+        type: "object",
+        required: ["id", "name", "isSystem", "permissionKeys"],
+        properties: {
+          id: { type: "string" },
+          name: { type: "string" },
+          description: { type: "string", nullable: true },
+          isSystem: { type: "boolean", description: "System roles cannot be edited or deleted." },
+          permissionKeys: { type: "array", items: { type: "string" } },
+        },
+      },
+      SyncLog: {
+        type: "object",
+        required: ["id", "syncType", "status", "startedAt"],
+        properties: {
+          id: { type: "string" },
+          syncType: { type: "string", enum: ["FULL", "INCREMENTAL", "CONTACTS", "INVOICES", "OVERPAYMENTS"] },
+          status: { type: "string", enum: ["RUNNING", "COMPLETED", "FAILED"] },
+          recordsFetched: { type: "integer", nullable: true },
+          startedAt: { type: "string", format: "date-time" },
+          completedAt: { type: "string", format: "date-time", nullable: true },
+          errorMessage: { type: "string", nullable: true },
+        },
+      },
+      Paginated: {
+        type: "object",
+        required: ["items", "total", "page", "limit"],
+        properties: {
+          items: { type: "array", items: {} },
+          total: { type: "integer" },
+          page: { type: "integer" },
+          limit: { type: "integer" },
+          totalPages: { type: "integer" },
+        },
+        description: "The envelope every list endpoint returns as its data payload.",
       },
       SheetMeta: {
         type: "object",
@@ -389,7 +576,14 @@ audit and access control requirements (SOC2-aligned).
           name: { type: "string", maxLength: 100 },
           assignments: {
             type: "array",
-            items: { type: "object", required: ["companyId", "role"], properties: { companyId: { type: "string" }, role: { type: "string", enum: ["ADMIN", "APPROVER", "OPERATOR"] } } },
+            items: {
+              type: "object",
+              required: ["companyId", "roleId"],
+              properties: {
+                companyId: { type: "string" },
+                roleId: { type: "string", description: "Id of a role from GET /roles." },
+              },
+            },
             default: [],
           },
         },
