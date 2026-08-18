@@ -1,4 +1,5 @@
 import { prisma, logger } from "../../config/index.js";
+import { paginated } from "../../types/api.types.js";
 import type { CreateAuditLogParams } from "./audit.interface.js";
 
 export const auditService = {
@@ -49,7 +50,7 @@ export const auditService = {
     if (resourceId) where.resourceId = resourceId;
     if (resourceType) where.resourceType = resourceType;
 
-    const [total, data] = await Promise.all([
+    const [total, items] = await Promise.all([
       prisma.auditLog.count({ where }),
       prisma.auditLog.findMany({
         where,
@@ -62,6 +63,6 @@ export const auditService = {
       }),
     ]);
 
-    return { total, page, limit, data };
+    return paginated(items, { total, page, limit });
   }
 };

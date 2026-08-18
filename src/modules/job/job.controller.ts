@@ -2,7 +2,7 @@ import { Request, Response } from "express";
 import { logger, prisma } from "../../config/index.js";
 import { Prisma } from "@prisma/client";
 import { jobQueue } from "../../jobs/queues.js";
-import { sendSuccess, sendError, ErrorCode, HttpStatus } from "../../types/api.types.js";
+import { sendSuccess, sendError, ErrorCode, HttpStatus, paginated } from "../../types/api.types.js";
 import type { AuthenticatedRequest } from "../../types/express.js";
 import { auditService } from "../audit/audit.service.js";
 import type { CreateJobBody, AddItemsBody, AutomationJobPayload } from "./job.interface.js";
@@ -148,7 +148,7 @@ export const jobController = {
                 }),
             ]);
 
-            sendSuccess(res, { total, page: pageNum, limit: limitNum, items: jobs });
+            sendSuccess(res, paginated(jobs, { total, page: pageNum, limit: limitNum }));
         } catch (err) {
             logger.error("Failed to list jobs", { err });
             sendError(res, ErrorCode.INTERNAL_ERROR, "Failed to list jobs");

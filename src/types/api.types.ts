@@ -61,3 +61,29 @@ export function sendError(
     error: { code, message },
   } satisfies ApiError);
 }
+
+/**
+ * The one paginated-list envelope. Every list endpoint returns this as its
+ * `data` payload, so the client has a single shape to handle.
+ *
+ * `items` is the payload key throughout — jobs, invoices, overpayments and
+ * contacts already used it; audit was migrated onto it.
+ */
+export interface Paginated<T> {
+  items: T[];
+  total: number;
+  page: number;
+  limit: number;
+  totalPages?: number;
+}
+
+/**
+ * Build a `Paginated<T>` envelope. Prefer this over an inline object literal at
+ * list endpoints: it is what stops `items` from drifting back to `data`.
+ */
+export function paginated<T>(
+  items: T[],
+  meta: { total: number; page: number; limit: number; totalPages?: number }
+): Paginated<T> {
+  return { items, ...meta };
+}

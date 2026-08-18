@@ -10,13 +10,6 @@ export interface QueryOptions {
     filters?: Record<string, any>;
 }
 
-export interface PaginatedResult<T> {
-    total: number;
-    page: number;
-    limit: number;
-    totalPages: number;
-    data: T[];
-}
 
 /**
  * Applies common query filters (pagination, sorting, searching) to a Prisma findMany/count query.

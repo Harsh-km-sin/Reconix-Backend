@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import { logger, prisma } from "../../../config/index.js";
-import { sendSuccess, sendError, ErrorCode, HttpStatus } from "../../../types/api.types.js";
+import { sendSuccess, sendError, ErrorCode, HttpStatus, paginated } from "../../../types/api.types.js";
 import type { AuthenticatedRequest } from "../../../types/express.js";
 import { applyQueryFilters, QueryOptions } from "../../../utils/prisma.utils.js";
 
@@ -59,13 +59,12 @@ export const overpaymentController = {
             const pageNum = queryOptions.page || 1;
             const limitNum = queryOptions.limit || 50;
 
-            sendSuccess(res, {
+            sendSuccess(res, paginated(overpayments, {
                 total,
                 page: pageNum,
                 limit: limitNum,
                 totalPages: Math.ceil(total / limitNum),
-                items: overpayments
-            });
+            }));
         } catch (err) {
             logger.error("Failed to fetch overpayments", { err });
             sendError(res, ErrorCode.INTERNAL_ERROR, "Failed to fetch overpayments");
