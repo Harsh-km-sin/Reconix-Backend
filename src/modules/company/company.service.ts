@@ -1,7 +1,6 @@
 import { prisma } from "../../config/index.js";
 import { hasModuleAccess } from "../../types/permissions.js";
-
-type UserContext = { userId: string; permissions: readonly string[] };
+import type { UserContext } from "./company.interface.js";
 
 function userCanAccessCompany(ctx: UserContext, companyId: string): Promise<boolean> {
   const isAdmin = hasModuleAccess(ctx.permissions, "admin");

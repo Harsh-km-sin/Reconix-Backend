@@ -4,14 +4,7 @@ import {
   SYSTEM_ROLES,
   NO_ROLE_MODULES,
 } from "../../types/permissions.js";
-
-export interface RoleWithPermissions {
-  id: string;
-  name: string;
-  description: string | null;
-  isSystem: boolean;
-  permissionKeys: string[];
-}
+import type { RoleWithPermissions } from "./permission.interface.js";
 
 // ── permission resolution cache (roleId → keys) ──────────────────────────────
 // Per-request authorization reads permissions from the JWT, so this cache is

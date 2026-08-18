@@ -1,11 +1,7 @@
 import { Request, Response } from "express";
 import { auditService } from "./audit.service.js";
 import { sendSuccess, sendError, ErrorCode, HttpStatus } from "../../types/api.types.js";
-import { AuthUser } from "../../types/express.js";
-
-interface AuthenticatedRequest extends Request {
-  user: AuthUser;
-}
+import type { AuthenticatedRequest } from "../../types/express.js";
 
 export const auditController = {
   /**

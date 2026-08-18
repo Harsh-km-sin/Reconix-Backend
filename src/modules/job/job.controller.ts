@@ -3,13 +3,9 @@ import { logger, prisma } from "../../config/index.js";
 import { Prisma } from "@prisma/client";
 import { jobQueue } from "../../jobs/queues.js";
 import { sendSuccess, sendError, ErrorCode, HttpStatus } from "../../types/api.types.js";
-import { AuthUser } from "../../types/express.js";
+import type { AuthenticatedRequest } from "../../types/express.js";
 import { auditService } from "../audit/audit.service.js";
 import type { CreateJobBody, AddItemsBody, AutomationJobPayload } from "./job.interface.js";
-
-interface AuthenticatedRequest extends Request {
-    user: AuthUser;
-}
 
 /**
  * Resolve the active Xero connection for a job's OWN company.

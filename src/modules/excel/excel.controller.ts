@@ -3,12 +3,8 @@ import { excelService } from "./excel.service.js";
 import { prisma, logger } from "../../config/index.js";
 import { storage } from "../../lib/storage.js";
 import { sendSuccess, sendError, ErrorCode, HttpStatus } from "../../types/api.types.js";
-import { AuthUser } from "../../types/express.js";
+import type { AuthenticatedRequest } from "../../types/express.js";
 import { auditService } from "../audit/audit.service.js";
-
-interface AuthenticatedRequest extends Request {
-  user: AuthUser;
-}
 
 export const excelController = {
   /**

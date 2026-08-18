@@ -1,18 +1,5 @@
 import { prisma, logger } from "../../config/index.js";
-
-export interface CreateAuditLogParams {
-  companyId: string;
-  userId?: string;
-  action: string;
-  resourceType?: string;
-  resourceId?: string;
-  beforeState?: any;
-  afterState?: any;
-  xeroRequest?: any;
-  xeroResponse?: any;
-  ipAddress?: string;
-  userAgent?: string;
-}
+import type { CreateAuditLogParams } from "./audit.interface.js";
 
 export const auditService = {
   /**

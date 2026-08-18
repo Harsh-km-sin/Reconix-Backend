@@ -44,3 +44,30 @@ export interface AuthResponse {
   /** All companies/roles for this user (for company switcher) */
   companies?: { companyId: string; companyName: string; role: string }[];
 }
+
+/**
+ * Purpose claim carried by the short-lived MFA-pending token. This type is the
+ * source of truth; `MFA_PENDING_PURPOSE` in auth.service.ts is annotated with it.
+ */
+export type MfaPendingPurpose = "mfa_pending";
+
+/** Claims on the token proving the password step passed and a TOTP is owed. */
+export interface MfaPendingClaims {
+  userId: string;
+  purpose: MfaPendingPurpose;
+}
+
+/** A user's role assignment at one company, with both entities resolved. */
+export interface RoleWithCompany {
+  companyId: string;
+  roleId: string;
+  company: { id: string; name: string };
+  role: { id: string; name: string };
+}
+
+/** The company/role context activated for a session. */
+export interface SessionContext {
+  roleId: string;
+  roleName: string;
+  companyId: string;
+}

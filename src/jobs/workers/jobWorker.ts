@@ -7,20 +7,6 @@ import { handleInvoiceReversalItem } from "../handlers/invoiceReversal.handler.j
 import { handleOverpaymentAllocationItem } from "../handlers/overpaymentAllocation.handler.js";
 import { generateIdempotencyKey, checkIdempotency, markIdempotencyCompleted, markIdempotencyFailed } from "../../utils/idempotency.js";
 
-interface XeroInvoiceRawJson {
-    Contact?: {
-        ContactID: string;
-    };
-    LineItems?: Array<{
-        Description?: string;
-        Quantity?: number;
-        UnitAmount?: number;
-        AccountCode?: string;
-        TaxType?: string;
-        Tracking?: any;
-    }>;
-}
-
 const connection = {
     host: env.redisHost,
     port: env.redisPort,

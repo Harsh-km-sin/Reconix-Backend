@@ -1,6 +1,7 @@
 import { prisma, logger } from "../../config/index.js";
 import { getXeroClient } from "../../config/xeroClient.js";
 import { withResourceLock } from "../../utils/lock.js";
+import type { XeroInvoiceRawJson } from "../../modules/xero/xero.interface.js";
 import { roundCurrency } from "../../utils/financialMath.js";
 import type { ReversalConfig, ReversalLineConfig } from "../../modules/job/job.interface.js";
 
@@ -59,7 +60,15 @@ export const handleInvoiceReversalItem = async (
   tenantId: string
 ): Promise<void> => {
   const xero = await getXeroClient(tenantId);
-  const rawJson: any = item.xeroInvoice.rawXeroJson ?? {};
+  const rawJson = (item.xeroInvoice.rawXeroJson ?? {}) as XeroInvoiceRawJson;
+  const contactId = rawJson.Contact?.ContactID;
+  if (!contactId) {
+    // Xero requires a contact on a credit note; without one the payload below
+    // would be silently malformed. Fail the item with a message that says why.
+    throw new Error(
+      `Invoice ${item.invoiceNumber} has no contact on its stored Xero payload; re-sync it before reversing.`
+    );
+  }
   const reversalConfig: ReversalConfig | null = item.reversalConfig ?? null;
 
   await withResourceLock(`invoice:${item.xeroInvoiceId}`, async () => {
@@ -172,7 +181,7 @@ export const handleInvoiceReversalItem = async (
     // ─── 5. Prepare the Credit Note payload ─────────────────────────────────
     const cnPayload: any = {
       Type: "ACCPAYCREDIT",
-      Contact: { ContactID: rawJson.Contact.ContactID },
+      Contact: { ContactID: contactId },
       Date: reversalDate,
       LineAmountTypes: lineAmountType,
       CurrencyCode: rawJson.CurrencyCode || item.xeroInvoice.currencyCode,

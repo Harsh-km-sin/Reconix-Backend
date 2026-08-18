@@ -13,20 +13,19 @@ import type {
   AuthResponse,
   AuthTokenPayload,
   MFAVerifyBody,
-  MFASetupResponse
+  MFASetupResponse,
+  MfaPendingPurpose,
+  MfaPendingClaims,
+  RoleWithCompany,
+  SessionContext,
 } from "./auth.interface.js";
 import { permissionService } from "../permission/permission.service.js";
 
 const SALT_ROUNDS = 10;
 
 /** Short-lived token proving a user passed the password step and now owes a TOTP. */
-const MFA_PENDING_PURPOSE = "mfa_pending";
+const MFA_PENDING_PURPOSE: MfaPendingPurpose = "mfa_pending";
 const MFA_PENDING_TTL = "5m";
-
-interface MfaPendingClaims {
-  userId: string;
-  purpose: typeof MFA_PENDING_PURPOSE;
-}
 
 /** Issue a signed token that authorises ONLY the second-factor (TOTP) step. */
 function signMfaPendingToken(userId: string): string {
@@ -65,15 +64,6 @@ function decryptSecret(stored: string): string {
   if (!looksEncrypted) return stored;
   return cryptoUtils.decrypt(stored, env.tokenEncryptionKey);
 }
-
-type RoleWithCompany = {
-  companyId: string;
-  roleId: string;
-  company: { id: string; name: string };
-  role: { id: string; name: string };
-};
-
-type SessionContext = { roleId: string; roleName: string; companyId: string };
 
 function signToken(payload: AuthTokenPayload): string {
   return jwt.sign(payload, env.jwtSecret, {

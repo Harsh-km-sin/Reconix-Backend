@@ -1,12 +1,9 @@
 import { Request, Response } from "express";
 import { logger, prisma } from "../../../config/index.js";
 import { sendSuccess, sendError, ErrorCode, HttpStatus } from "../../../types/api.types.js";
-import { AuthUser } from "../../../types/express.js";
+import type { AuthenticatedRequest } from "../../../types/express.js";
+import type { XeroInvoiceRawJson } from "../xero.interface.js";
 import { applyQueryFilters, QueryOptions } from "../../../utils/prisma.utils.js";
-
-interface AuthenticatedRequest extends Request {
-    user: AuthUser;
-}
 
 export const invoiceController = {
     /**
@@ -135,7 +132,7 @@ export const invoiceController = {
                 return;
             }
 
-            const raw: any = invoice.rawXeroJson ?? {};
+            const raw = (invoice.rawXeroJson ?? {}) as XeroInvoiceRawJson;
 
             const detail = {
                 id: invoice.id,

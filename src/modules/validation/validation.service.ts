@@ -1,22 +1,6 @@
 import { prisma, redis, logger } from "../../config/index.js";
 import { getXeroClient } from "../../config/xeroClient.js";
-
-export interface ValidationItem {
-    id: string; // Temporary ID from frontend or DB ID
-    itemType: "INVOICE_REVERSAL" | "OVERPAYMENT_ALLOCATION";
-    invoiceNumber?: string;
-    xeroInvoiceId?: string;
-    xeroOverpaymentId?: string;
-    expectedAmount?: number;
-    contactName?: string;
-}
-
-export interface ValidationReport {
-    id: string;
-    status: "VALID" | "WARNING" | "INVALID" | "ERROR";
-    warnings: string[];
-    errors: string[];
-}
+import type { ValidationItem, ValidationReport } from "./validation.interface.js";
 
 /**
  * Simple similarity function (Dice Coefficient) for fuzzy contact name matching.

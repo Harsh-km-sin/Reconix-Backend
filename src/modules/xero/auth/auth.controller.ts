@@ -8,12 +8,8 @@ import { ADMIN_ROLE_NAME } from "../../../types/permissions.js";
 import { syncQueue } from "../../../jobs/queues.js";
 import { SyncJobType } from "../../../jobs/workers/syncWorker.js";
 import { sendSuccess, sendError, ErrorCode, HttpStatus } from "../../../types/api.types.js";
-import { AuthUser } from "../../../types/express.js";
+import type { AuthenticatedRequest } from "../../../types/express.js";
 import { auditService } from "../../audit/audit.service.js";
-
-interface AuthenticatedRequest extends Request {
-    user: AuthUser;
-}
 
 export const authController = {
     /**
