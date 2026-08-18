@@ -35,6 +35,7 @@ audit and access control requirements (SOC2-aligned).
     { name: "Health", description: "Service health and readiness" },
     { name: "Authentication", description: "Login and set-password (invite flow); returns JWT for protected endpoints" },
     { name: "Users", description: "User management; admin invites users and assigns roles/companies" },
+    { name: "Excel", description: "Spreadsheet upload and parsing. The server owns parsing; clients do not read files themselves." },
   ],
   paths: {
     "/health": {
@@ -146,6 +147,104 @@ audit and access control requirements (SOC2-aligned).
         },
       },
     },
+    "/excel/upload": {
+      post: {
+        tags: ["Excel"],
+        summary: "Upload a spreadsheet",
+        description:
+          "Accepts .xlsx, .xls or .csv up to 25 MB as multipart/form-data field 'file'. " +
+          "The file is parsed on upload, so the response already carries the sheet list, " +
+          "each sheet's headers and its row count — a client never needs to parse the file itself. " +
+          "A CSV is presented as a single sheet named 'Sheet1' so clients have one code path. " +
+          "Returns 400 if the file cannot be read or has no sheets.",
+        operationId: "uploadSpreadsheet",
+        security: [{ BearerAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            "multipart/form-data": {
+              schema: {
+                type: "object",
+                required: ["file"],
+                properties: { file: { type: "string", format: "binary" } },
+              },
+            },
+          },
+        },
+        responses: {
+          "201": {
+            description: "File stored and parsed",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: { success: { type: "boolean", example: true }, data: { $ref: "#/components/schemas/UploadMetadata" } },
+                },
+              },
+            },
+          },
+          "400": { description: "No file, unreadable file, or no sheets", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } },
+          "401": { description: "Missing or invalid JWT", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } },
+          "500": { description: "Internal server error", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } },
+        },
+      },
+    },
+    "/excel/{uploadId}/metadata": {
+      get: {
+        tags: ["Excel"],
+        summary: "Describe an upload",
+        description: "Re-read the sheet list, headers and detected layouts for an upload. Same payload as POST /excel/upload.",
+        operationId: "getUploadMetadata",
+        security: [{ BearerAuth: [] }],
+        parameters: [
+          { name: "uploadId", in: "path", required: true, schema: { type: "string" } },
+        ],
+        responses: {
+          "200": {
+            description: "Upload metadata",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: { success: { type: "boolean", example: true }, data: { $ref: "#/components/schemas/UploadMetadata" } },
+                },
+              },
+            },
+          },
+          "404": { description: "Upload not found", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } },
+        },
+      },
+    },
+    "/excel/{uploadId}/sheet/{sheetName}": {
+      get: {
+        tags: ["Excel"],
+        summary: "Read one sheet",
+        description:
+          "The parsed rows of a single sheet. Each row is an object keyed by the sheet's raw header text, " +
+          "so 'headers' lines up exactly with the keys in 'rows'. Empty cells are returned as \"\", not omitted. " +
+          "For a CSV the sheet name is always 'Sheet1'.",
+        operationId: "getSheetData",
+        security: [{ BearerAuth: [] }],
+        parameters: [
+          { name: "uploadId", in: "path", required: true, schema: { type: "string" } },
+          { name: "sheetName", in: "path", required: true, schema: { type: "string" }, description: "URL-encoded sheet name." },
+        ],
+        responses: {
+          "200": {
+            description: "Sheet contents",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: { success: { type: "boolean", example: true }, data: { $ref: "#/components/schemas/SheetData" } },
+                },
+              },
+            },
+          },
+          "404": { description: "Upload or sheet not found", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } },
+        },
+      },
+    },
   },
   components: {
     securitySchemes: {
@@ -230,6 +329,55 @@ audit and access control requirements (SOC2-aligned).
             type: "array",
             items: { type: "object", properties: { companyId: { type: "string" }, companyName: { type: "string" }, role: { type: "string" } } },
             description: "Companies the user can access (for company switcher).",
+          },
+        },
+      },
+      SheetMeta: {
+        type: "object",
+        required: ["name", "rowCount", "headers", "normalizedHeaders", "isAutoDetected"],
+        properties: {
+          name: { type: "string" },
+          rowCount: { type: "integer", description: "Data rows, excluding the header row." },
+          headers: {
+            type: "array",
+            items: { type: "string" },
+            description: "Header cells exactly as written in the file. These are the keys of each object in SheetData.rows.",
+          },
+          normalizedHeaders: {
+            type: "array",
+            items: { type: "string" },
+            description: "Headers run through the alias table (e.g. 'Supplier Name' -> 'SupplierName'). Mapping hints only; never row keys.",
+          },
+          isAutoDetected: { type: "boolean", description: "True when the sheet matched a known layout." },
+        },
+      },
+      UploadMetadata: {
+        type: "object",
+        required: ["uploadId", "fileName", "sizeBytes", "kind", "sheets", "autoMappings"],
+        properties: {
+          uploadId: { type: "string" },
+          fileName: { type: "string" },
+          sizeBytes: { type: "integer" },
+          kind: { type: "string", enum: ["excel", "csv"] },
+          sheets: { type: "array", items: { $ref: "#/components/schemas/SheetMeta" } },
+          autoMappings: {
+            type: "object",
+            additionalProperties: { type: "string" },
+            description: "Detected layout to sheet name, e.g. { bills: 'Sheet1' }.",
+          },
+        },
+      },
+      SheetData: {
+        type: "object",
+        required: ["sheetName", "headers", "rowCount", "rows"],
+        properties: {
+          sheetName: { type: "string" },
+          headers: { type: "array", items: { type: "string" } },
+          rowCount: { type: "integer" },
+          rows: {
+            type: "array",
+            items: { type: "object", additionalProperties: true },
+            description: "Objects keyed by raw header text.",
           },
         },
       },

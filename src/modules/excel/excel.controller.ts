@@ -22,6 +22,31 @@ export const excelController = {
 
       const filePath = await storage.saveFile(`${Date.now()}-${file.originalname}`, file.buffer);
 
+      // Parse up front. The client needs the sheet list to render its picker,
+      // and a file we cannot read should fail here rather than one call later.
+      let sheetsFound: string[];
+      try {
+        sheetsFound = await excelService.listSheetNames(file.buffer, file.originalname);
+      } catch {
+        sendError(
+          res,
+          ErrorCode.VALIDATION_ERROR,
+          "Could not read that file. Upload a .xlsx, .xls or .csv.",
+          HttpStatus.BAD_REQUEST
+        );
+        return;
+      }
+
+      if (sheetsFound.length === 0) {
+        sendError(
+          res,
+          ErrorCode.VALIDATION_ERROR,
+          "That file has no sheets.",
+          HttpStatus.BAD_REQUEST
+        );
+        return;
+      }
+
       const record = await prisma.excelUpload.create({
         data: {
           companyId: authedReq.user.companyId!,
@@ -30,7 +55,7 @@ export const excelController = {
           sizeBytes: file.size,
           s3Key: filePath,
           status: "UPLOADED",
-          sheetsFound: [], // Will be filled on parse
+          sheetsFound,
         }
       });
 
@@ -45,7 +70,7 @@ export const excelController = {
         userAgent: req.headers["user-agent"],
       });
 
-      sendSuccess(res, record, HttpStatus.CREATED);
+      sendSuccess(res, await excelService.getMetadata(record.id), HttpStatus.CREATED);
     } catch (err) {
       logger.error("Excel upload failed", { err });
       sendError(res, ErrorCode.INTERNAL_ERROR, "Failed to upload file");
@@ -60,8 +85,24 @@ export const excelController = {
       const { uploadId } = req.params;
       const metadata = await excelService.getMetadata(uploadId);
       sendSuccess(res, metadata);
-    } catch (err: any) {
-      sendError(res, ErrorCode.NOT_FOUND, err.message, HttpStatus.NOT_FOUND);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Upload not found";
+      sendError(res, ErrorCode.NOT_FOUND, message, HttpStatus.NOT_FOUND);
+    }
+  },
+
+  /**
+   * GET /api/v1/excel/:uploadId/sheet/:sheetName
+   * The parsed rows of one sheet. This is what replaced the client-side xlsx
+   * parse in the job upload builder.
+   */
+  async getSheetData(req: Request, res: Response): Promise<void> {
+    try {
+      const { uploadId, sheetName } = req.params;
+      sendSuccess(res, await excelService.getSheetData(uploadId, decodeURIComponent(sheetName)));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Sheet not found";
+      sendError(res, ErrorCode.NOT_FOUND, message, HttpStatus.NOT_FOUND);
     }
   },
 
