@@ -197,15 +197,93 @@ One commit per phase, per repo. Prefix: `refactor(fe):` / `refactor(be):`.
 
 ## 9. Progress
 
-- [ ] F0 · Unblock build + baseline bundle
-- [ ] B1 · Backend types consolidation + ESLint guard
-- [ ] F1 · Frontend restructure (pure moves)
-- [ ] F2 · Frontend types consolidation + guardrails
-- [ ] F3 · Design tokens
-- [ ] F4 · format / status / hooks
-- [ ] F5 · Feedback family + Modal + PageHeader
-- [ ] F6 · DataTable + migrate 7 tables
-- [ ] F7 · Inputs, cards, Layout decomposition
-- [ ] B2 · Excel contract
-- [ ] F8 · Drop xlsx, lazy routes, re-measure
-- [ ] B3 · OpenAPI refresh + dead-code removal
+All twelve phases are complete. Both repos gate clean: `tsc --noEmit`,
+`npm run build`, and `eslint` with 0 errors.
+
+- [x] F0 · Unblock build + baseline bundle
+- [x] B1 · Backend types consolidation + ESLint guard
+- [x] F1 · Frontend restructure (pure moves)
+- [x] F2 · Frontend types consolidation + guardrails
+- [x] F3 · Design tokens
+- [x] F4 · format / status / hooks
+- [x] F5 · Feedback family + Modal + PageHeader
+- [x] F6 · DataTable + migrate 7 tables
+- [x] F7 · Inputs, cards, Layout decomposition
+- [x] B2 · Excel contract
+- [x] F8 · Drop xlsx, lazy routes, re-measure
+- [x] B3 · OpenAPI refresh + dead-code removal
+
+### Outcome
+
+| | Before | After |
+|---|---|---|
+| Entry JS chunk | 956.33 kB (gzip 287.47) | **297.32 kB (gzip 95.47)** |
+| JS chunks | 1 | 31 |
+| Hardcoded hex colours | 1,097 | ~30 one-offs |
+| Hand-rolled `<table>` | 7 | 0 |
+| Hand-rolled modal overlays | 6 (the plan said 3) | 3 |
+| `AuthenticatedRequest` copies | 11 | 1 |
+| `ListResponse<T>` declarations | 2, incompatible | 1 |
+| Types declared in pages / services | 7 / 11 | 0 / 0, ESLint-enforced |
+| `Layout.tsx` | 392 LOC | 55 LOC across 6 files |
+| Documented API endpoints | 4 | 11 |
+| Lint errors (fe / be) | 3 / 0 | 0 / 0 |
+
+### Where the plan was wrong, and what was done instead
+
+1. **`ListResponse<T>` was not a duplicate.** The two declarations were
+   *incompatible*: jobService keyed the payload `items`, auditService keyed
+   it `data`. They mirrored a real disagreement between the backend's job and
+   audit endpoints, so deduplicating the frontend alone would have broken the
+   audit log. The backend was aligned on `items` first, in its own commit; a
+   `paginated()` helper now builds every list envelope so the key cannot drift
+   again; only then did F2 collapse the frontend onto one `Paginated<T>`.
+
+2. **The single biggest bundle win was not in the plan at all.**
+   `kimi-plugin-inspect-react` has no build-time gate of its own, so it was
+   stamping `code-path="<source file>:<line>:<col>"` onto all 1,215 JSX
+   elements in *production* builds — 78 kB of dead weight, and it published
+   the shape of the source tree to anyone reading the shipped HTML. This also
+   explained why F1's pure file moves appeared to grow the bundle by 17 kB:
+   deeper directories mean longer path strings. Fixed in its own commit.
+
+3. **`XeroInvoiceRawJson` was dead code.** B1 lists it as a type to relocate,
+   but it was declared in `jobWorker.ts` and never used, while two real
+   consumers typed the same payload as `any`. Moving dead code into a shared
+   interface file would have made it look canonical. It was extended to cover
+   the fields those sites actually read, and wired into both. Its `Contact` is
+   optional, because the stored JSON may genuinely lack one — the reversal
+   handler now fails such an item with a message saying so, rather than
+   throwing a bare `TypeError` on `rawJson.Contact.ContactID`.
+
+4. **Six hand-rolled modal overlays, not three.** Three were migrated onto the
+   new `Modal` / `ConfirmDialog`; the rest are listed below.
+
+5. **`syncTaxRates` was deleted, not implemented.** There is no TaxRate model
+   to sync into, and the one place the app does tax maths derives an effective
+   rate from the invoice itself. Implementing it would have meant inventing a
+   schema nothing asked for.
+
+6. **A sixth list endpoint existed.** `/xero/accounts` was not in the audit; it
+   is on the shared envelope too.
+
+7. **The OpenAPI spec was not merely stale, it was wrong.** It told clients to
+   send `role: "ADMIN" | "APPROVER" | "OPERATOR"` when inviting a user, but
+   `inviteUserSchema` has validated `roleId` since the RBAC overhaul — the
+   server would have rejected anything written against the documentation.
+
+### Deliberately left undone
+
+- **`JobDetailModal` and `SyncModal`.** Both appear in the target tree. They
+  are ~230 lines of JSX each, heavily coupled to their pages' state, and are
+  their own change rather than a tail-end of F7.
+- **AuditLog's detail panel** is a right-side slide-over, not a centred
+  dialog. It needs a Sheet-based component; `Modal` is the wrong shape for it.
+- **~30 hex literals**, each used 1–4 times: near-duplicate greys and pastels
+  (`#F8F9FA`, `#F9FAFB`, `#EEEEEE`, `#D4D4D4`, `#CBD5E1`, `#BDBDBD`,
+  `#FFE0B2`, `#FFCDD2`, `#FFE8CC`, `#FDECEA`, `#D1F0FA`, `#795548`). Folding
+  them onto existing tokens is a visible design decision, not a mechanical
+  one, so they were left explicit rather than silently rounded.
+- **CI.** Neither repo has a CI config. Every structural rule is error-level,
+  so any pipeline running `npm run lint` will fail on a violation — but
+  nothing runs it yet.
